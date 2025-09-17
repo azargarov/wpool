@@ -36,7 +36,9 @@ func TestJobSuccess(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("job did not complete")
 	}
-
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Shutdown(ctx)
 	if got := p.ActiveWorkers(); got != 0 {
 		t.Fatalf("active workers = %d; want 0", got)
 	}
