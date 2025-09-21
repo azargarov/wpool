@@ -11,7 +11,10 @@ import (
 )
 
 const (
-	defaultMaxWorkers = 10
+	DefaultMaxWorkers = 10
+	defaultAttempts = 3
+	defaultInitialRetry = 200 * time.Millisecond
+	defauiltMaxRetry = 5* time.Second
 )
 
 type RetryPolicy struct {
@@ -41,18 +44,27 @@ type Pool[T any] struct {
 	submitBufRatio int
 }
 
+func GetDefaultRP() *RetryPolicy{
+	rp := RetryPolicy{
+		Attempts: defaultAttempts,
+		Initial: defaultInitialRetry,
+		Max: defauiltMaxRetry,
+	}
+	return &rp
+}
+
 func NewPool[T any](maxWorkers int, defaultRetry RetryPolicy) *Pool[T] {
 	if maxWorkers <= 0 {
-		maxWorkers = defaultMaxWorkers
+		maxWorkers = DefaultMaxWorkers
 	}
 	if defaultRetry.Attempts <= 0 {
-		defaultRetry.Attempts = 3
+		defaultRetry.Attempts = defaultAttempts
 	}
 	if defaultRetry.Initial <= 0 {
-		defaultRetry.Initial = 200 * time.Millisecond
+		defaultRetry.Initial = defaultInitialRetry
 	}
 	if defaultRetry.Max <= 0 {
-		defaultRetry.Max = 5 * time.Second
+		defaultRetry.Max = defauiltMaxRetry
 	}
 
 	p := &Pool[T]{

@@ -11,6 +11,18 @@ import (
 
 var fastRetry = RetryPolicy{Attempts: 3, Initial: 5 * time.Millisecond, Max: 10 * time.Millisecond}
 
+
+func TestDefultRetryPolicy(t *testing.T){
+	rp := GetDefaultRP()
+	if rp == nil {
+		t.Fatalf("Default Retry Polic is nil")	
+	}
+
+	if rp.Attempts != defaultAttempts || rp.Initial != defaultInitialRetry || rp.Max != defauiltMaxRetry{
+		t.Fatal("Defauilt retry policy is not default")
+	}
+}
+
 func TestJobSuccess(t *testing.T) {
 	p := NewPool[int](2, fastRetry)
 	defer p.Stop()
