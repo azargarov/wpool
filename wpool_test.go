@@ -11,14 +11,13 @@ import (
 
 var fastRetry = RetryPolicy{Attempts: 3, Initial: 5 * time.Millisecond, Max: 10 * time.Millisecond}
 
-
-func TestDefultRetryPolicy(t *testing.T){
+func TestDefultRetryPolicy(t *testing.T) {
 	rp := GetDefaultRP()
 	if rp == nil {
-		t.Fatalf("Default Retry Polic is nil")	
+		t.Fatalf("Default Retry Polic is nil")
 	}
 
-	if rp.Attempts != defaultAttempts || rp.Initial != defaultInitialRetry || rp.Max != defauiltMaxRetry{
+	if rp.Attempts != defaultAttempts || rp.Initial != defaultInitialRetry || rp.Max != defauiltMaxRetry {
 		t.Fatal("Defauilt retry policy is not default")
 	}
 }
@@ -98,7 +97,7 @@ func TestCancelDuringBackoff(t *testing.T) {
 	defer p.Stop()
 
 	var attempts int32
-	step := make(chan struct{}) 
+	step := make(chan struct{})
 	jobCtx, cancel := context.WithCancel(context.Background())
 
 	err := p.Submit(Job[int]{
@@ -107,7 +106,7 @@ func TestCancelDuringBackoff(t *testing.T) {
 		Retry:   &RetryPolicy{Attempts: 5, Initial: 100 * time.Millisecond, Max: 100 * time.Millisecond},
 		Fn: func(_ int) error {
 			atomic.AddInt32(&attempts, 1)
-			close(step) 
+			close(step)
 			return errors.New("boom")
 		},
 	})

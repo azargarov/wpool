@@ -3,18 +3,18 @@ package workerpool
 import (
 	"context"
 	"fmt"
+	boff "github.com/Andrej220/go-utils/backoff"
+	lg "github.com/Andrej220/go-utils/zlog"
 	"sync"
 	"sync/atomic"
 	"time"
-	boff "github.com/Andrej220/go-utils/backoff"
-	lg "github.com/Andrej220/go-utils/zlog"
 )
 
 const (
-	DefaultMaxWorkers = 10
-	defaultAttempts = 3
+	DefaultMaxWorkers   = 10
+	defaultAttempts     = 3
 	defaultInitialRetry = 200 * time.Millisecond
-	defauiltMaxRetry = 5* time.Second
+	defauiltMaxRetry    = 5 * time.Second
 )
 
 type RetryPolicy struct {
@@ -30,7 +30,7 @@ type Job[T any] struct {
 	Fn          JobFunc[T]
 	Ctx         context.Context
 	CleanupFunc func()
-	Retry       *RetryPolicy 
+	Retry       *RetryPolicy
 }
 
 type Pool[T any] struct {
@@ -44,11 +44,11 @@ type Pool[T any] struct {
 	submitBufRatio int
 }
 
-func GetDefaultRP() *RetryPolicy{
+func GetDefaultRP() *RetryPolicy {
 	rp := RetryPolicy{
 		Attempts: defaultAttempts,
-		Initial: defaultInitialRetry,
-		Max: defauiltMaxRetry,
+		Initial:  defaultInitialRetry,
+		Max:      defauiltMaxRetry,
 	}
 	return &rp
 }
@@ -81,12 +81,12 @@ func NewPool[T any](maxWorkers int, defaultRetry RetryPolicy) *Pool[T] {
 	return p
 }
 
-//None-blocking pull stop
+// None-blocking pull stop
 func (p *Pool[T]) Shutdown(ctx context.Context) error {
 	var already bool
 	p.stopOnce.Do(func() {
 		close(p.closed) // reject new jobs
-		close(p.jobs)   // drain 
+		close(p.jobs)   // drain
 	})
 	// detect if we already closed before
 	select {
@@ -207,7 +207,7 @@ func (p *Pool[T]) processJob(job Job[T]) {
 			case <-timer.C:
 			case <-job.Ctx.Done():
 				if !timer.Stop() {
-					<-timer.C  // drain if timer is fired
+					<-timer.C // drain if timer is fired
 				}
 				logger.Info("Job canceled", lg.Any("reason", job.Ctx.Err()))
 				return
