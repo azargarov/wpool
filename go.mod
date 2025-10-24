@@ -4,7 +4,7 @@ go 1.23.6
 
 require (
 	github.com/azargarov/go-utils/backoff v0.1.1
-	github.com/azargarov/go-utils/zlog v0.1.3
+	github.com/azargarov/go-utils/zlog v0.1.5
 )
 
 require (

@@ -1,7 +1,7 @@
 github.com/azargarov/go-utils/backoff v0.1.1 h1:teizMcvo5m+nPhur+C7gul4EVMgr+xA0GPMtgCtfDO8=
 github.com/azargarov/go-utils/backoff v0.1.1/go.mod h1:AU7P4UmSTy0hvrZ14gcSd/nTff3ku3JvNvoVvJSHgjY=
-github.com/azargarov/go-utils/zlog v0.1.3 h1:cde5KTxsMLf0242eX5fBq2PjJ/6kKMskCTSlLDVxjSA=
-github.com/azargarov/go-utils/zlog v0.1.3/go.mod h1:5i2ZzZOiXCoPD4cVDfqBqnpr8cDMMGFTMx6peVXkZk4=
+github.com/azargarov/go-utils/zlog v0.1.5 h1:at9DNvomKYSQZOX+d+VL79PYVhE4hlw9EZF+bqpyYow=
+github.com/azargarov/go-utils/zlog v0.1.5/go.mod h1:5i2ZzZOiXCoPD4cVDfqBqnpr8cDMMGFTMx6peVXkZk4=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
