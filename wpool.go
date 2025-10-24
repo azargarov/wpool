@@ -3,8 +3,8 @@ package workerpool
 import (
 	"context"
 	"fmt"
-	boff "github.com/Andrej220/go-utils/backoff"
-	lg "github.com/Andrej220/go-utils/zlog"
+	boff "github.com/azargarov/go-utils/backoff"
+	lg "github.com/azargarov/go-utils/zlog"
 	"sync"
 	"sync/atomic"
 	"time"
