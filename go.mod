@@ -3,8 +3,8 @@ module github.com/azargarov/go-utils/wpool
 go 1.23.6
 
 require (
-	github.com/azargarov/go-utils/backoff v0.1.0
-	github.com/azargarov/go-utils/zlog v0.1.0
+	github.com/azargarov/go-utils/backoff v0.1.1
+	github.com/azargarov/go-utils/zlog v0.1.3
 )
 
 require (
