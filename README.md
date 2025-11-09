@@ -1,25 +1,27 @@
-# workerpool
+# workerpool — Priority, Aging, and Retries for Go Jobs
 
-A tiny, **bounded-concurrency** worker pool for Go with **per‑job retries**, **context‑aware cancelation**, **panic recovery**, and **graceful shutdown with timeout**.
+**bounded-concurrency** worker pool for Go with:
 
-- Generic over payload type `T`.
-- Per‑pool defaults + per‑job `RetryPolicy` overrides.
-- Context-aware backoff (stops sleeping when the job is canceled).
-- `Submit` (blocking) and `TrySubmit` (non‑blocking).
-- `Shutdown(ctx)` to close the pool and wait up to a deadline.
-- Safe cleanup callbacks and panic isolation (a panicking job won’t kill the worker).
+- 🎯 **Priority queue** in front of workers  
+- ⏳ **Aging** (old jobs bubble up automatically)  
+- 🔁 **Per-job retries** with context-aware backoff  
+- 🧩 **Panic-safe workers** and per-job cleanup  
+- 🕒 **Graceful shutdown** with deadlines  
+- 📊 **Metrics** (submitted, executed, active workers, max age)
+
+Module: `github.com/azargarov/go-utils/wpool`
 
 ---
 
-## Install
+## 🧩 Install
 
 ```bash
-go get github.com/Andrej220/go-utils/workerpool
+go get github.com/azargarov/go-utils/wpool
 ```
 
 ---
 
-## Quick start
+## 🚀 Quick start
 
 ```go
 package main
@@ -29,56 +31,85 @@ import (
 	"fmt"
 	"time"
 
-	wp "github.com/Andrej220/go-utils/workerpool"
+	wp "github.com/azargarov/go-utils/wpool"
 )
 
 func main() {
-	// Create a pool with 4 workers and sane default retry policy.
-	pool := wp.NewPool[int](4, wp.RetryPolicy{
+	opts := wp.Options{
+		Workers:    4,
+		AgingRate:  0.3,
+		RebuildDur: 200 * time.Millisecond,
+		QueueSize:  256,
+	}
+
+	pool := wp.NewPool[int](opts, wp.RetryPolicy{
 		Attempts: 3,
 		Initial:  200 * time.Millisecond,
 		Max:      5 * time.Second,
 	})
-	defer pool.Stop() // blocks until all jobs complete
+	defer pool.Stop()
 
-	// Submit a job with a 3s timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	jobCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_ = pool.Submit(wp.Job[int]{
+	// Submit a job with base priority = 10
+	if err := pool.Submit(wp.Job[int]{
 		Payload: 42,
-		Ctx:     ctx,
+		Ctx:     jobCtx,
 		Fn: func(n int) error {
 			fmt.Println("processing", n)
 			return nil
 		},
-	})
+	}, 10); err != nil {
+		panic(err)
+	}
 }
 ```
 
 ---
 
-## Per‑job retry override
+## ⚖️ Priority & Aging
 
-Override the pool defaults for a specific job:
+Each job has a **base priority** (`float64`).  
+The scheduler uses a **max-heap** and periodically “ages” queued jobs:
+
+```
+effective = basePriority + agingRate * ageSeconds
+```
+
+So high-priority jobs run sooner, but even low-priority jobs eventually rise to the top — no starvation.
+
+```go
+_ = pool.Submit(jobFast, 100) // high priority
+_ = pool.Submit(jobSlow, 1)   // low priority, but will age
+```
+
+---
+
+## 🔁 Per-job Retry Override
+
+You can override the pool’s default retry policy per job:
 
 ```go
 _ = pool.Submit(wp.Job[int]{
 	Payload: 1,
 	Ctx:     context.Background(),
-	Retry:   &wp.RetryPolicy{Attempts: 5, Initial: 50 * time.Millisecond, Max: 500 * time.Millisecond},
+	Retry:   &wp.RetryPolicy{
+		Attempts: 5,
+		Initial:  50 * time.Millisecond,
+		Max:      500 * time.Millisecond,
+	},
 	Fn: func(n int) error {
-		// do work; return error to trigger retry/backoff
 		return fmt.Errorf("transient failure")
 	},
-})
+}, 5)
 ```
+
+Retries are **context-aware** — canceling the job’s context stops the backoff instantly.
 
 ---
 
-## Cancel during backoff (context‑aware)
-
-Backoff sleep stops early if the job’s context is canceled:
+## 🧨 Cancel During Backoff
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -88,98 +119,103 @@ _ = pool.Submit(wp.Job[int]{
 	Payload: 7,
 	Ctx:     ctx,
 	Fn: func(int) error {
-		// return an error so the pool enters backoff; the timeout cancels it
+		// returning an error triggers retry/backoff;
+		// the timeout cancels it early
 		return fmt.Errorf("boom")
 	},
-})
+}, 10)
 ```
 
 ---
 
-## Graceful shutdown with deadline
-
-`Shutdown(ctx)` stops submissions, closes the jobs channel, and waits for workers up to `ctx`’s deadline:
+## 🛑 Graceful Shutdown
 
 ```go
-// Ask workers to finish within 5s.
-shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
-if err := pool.Shutdown(shCtx); err != nil {
+if err := pool.Shutdown(ctx); err != nil {
 	// context.DeadlineExceeded if not all jobs finished in time
 }
 ```
 
-`Stop()` is equivalent to `Shutdown(context.Background())` (waits indefinitely).
+`Stop()` is shorthand for `Shutdown(context.Background())` (waits indefinitely).
 
 ---
 
-## API
-
-### Types
+## 📊 Metrics
 
 ```go
-type RetryPolicy struct {
-	Attempts int           // number of tries; >=1
-	Initial  time.Duration // first backoff
-	Max      time.Duration // cap for backoff
+m := pool.Metrics()
+fmt.Println("submitted:", m.Submitted())
+fmt.Println("executed:", m.Executed())
+fmt.Println("active workers:", pool.ActiveWorkers())
+fmt.Println("queue length:", pool.QueueLength())
+```
+
+---
+
+## 🧠 API Overview
+
+```go
+type Options struct {
+	Workers    int
+	AgingRate  float64
+	RebuildDur time.Duration
+	QueueSize  int
 }
 
-type JobFunc[T any] func(T) error
+type RetryPolicy struct {
+	Attempts int
+	Initial  time.Duration
+	Max      time.Duration
+}
 
 type Job[T any] struct {
 	Payload     T
-	Fn          JobFunc[T]
-	Ctx         context.Context      // nil -> context.Background()
-	CleanupFunc func()               // optional; always called
-	Retry       *RetryPolicy         // nil -> pool default
+	Fn          func(T) error
+	Ctx         context.Context
+	CleanupFunc func()
+	Retry       *RetryPolicy
 }
 
-type Pool[T any] struct { /* ... */ }
-```
-
-### Constructors & methods
-
-```go
-func NewPool[T any](maxWorkers int, defaultRetry RetryPolicy) *Pool[T]
-
-// Queue a job (blocks if the channel buffer is full). Returns error if pool is closed.
-func (p *Pool[T]) Submit(job Job[T]) error
-
-// Try to queue a job without blocking. Returns false if buffer full or pool is closed.
-func (p *Pool[T]) TrySubmit(job Job[T]) bool
-
-// Close the pool and wait for workers up to ctx deadline (drains queued jobs).
+func NewPool[T any](opts Options, defaultRetry RetryPolicy) *Pool[T]
+func (p *Pool[T]) Submit(job Job[T], basePrio float64) error
 func (p *Pool[T]) Shutdown(ctx context.Context) error
-
-// Wait forever (no deadline). Legacy convenience.
 func (p *Pool[T]) Stop()
-
-func (p *Pool[T]) ActiveWorkers() int32
+func (p *Pool[T]) Metrics() Metrics
+func (p *Pool[T]) ActiveWorkers() int
 func (p *Pool[T]) QueueLength() int
 ```
 
 ---
 
-## Design notes
+## ⚙️ Design Highlights
 
-- **Bounded concurrency:** fixed worker count reads from a buffered `jobs` channel (size `2 * maxWorkers` by default).
-- **Draining on shutdown:** `Shutdown` closes `jobs`; workers exit after the buffer is drained and in‑flight jobs finish (or their contexts cancel).
-- **Backoff:** uses your `github.com/Andrej220/go-utils/backoff` generator.
-- **Panic safety:** worker wraps each job in `recover()` so a crashing job doesn’t kill the worker.
-- **Context everywhere:** jobs can time out or be canceled; backoff sleeps are interruptible via `ctx.Done()`.
-- **Logging:** if you inject a logger into `context` (e.g., your `zlog` helper), the pool will use it; otherwise it’s a no‑op.
+- **Bounded concurrency** — fixed worker count, controlled queue.  
+- **Scheduler** — priority heap + periodic “aging” of queued jobs.  
+- **Graceful shutdown** — drains queue before exiting.  
+- **Retry & backoff** — configurable per job, context-aware.  
+- **Safe workers** — recover from panics and always run cleanup.  
+- **Metrics** — track submitted/executed jobs and worker states.
 
 ---
 
-## Testing
+## 🧪 Testing
 
-This package is designed for unit tests:
-- Tiny retry/backoff values speed up tests.
-- See sample tests for: success, retry, cancel‑during‑backoff, shutdown deadline, panic recovery, cleanup callbacks.
+This package is test-friendly:
+- Tiny backoff values speed up unit tests.
+- Includes tests for success, retry, cancel-during-backoff, shutdown deadlines, and panic recovery.
 
 Run:
 ```bash
 go test ./...
 ```
 
+---
+
+## 🧩 Related Packages
+
+- [`backoff`](../backoff) — Exponential retry and delay generator  
+- [`zlog`](../zlog) — Structured logger (zap-based)  
+- [`grlimit`](../grlimit) — Lightweight concurrency gate  

@@ -11,19 +11,29 @@ import (
 
 var fastRetry = RetryPolicy{Attempts: 3, Initial: 5 * time.Millisecond, Max: 10 * time.Millisecond}
 
+func newTestPool(workers int) *Pool[int] {
+	opts := Options{
+		Workers:    workers,
+		AgingRate:  0.3,
+		RebuildDur: 10 * time.Millisecond,
+		QueueSize:  128,
+	}
+	return NewPool[int](opts, fastRetry)
+}
+
 func TestDefultRetryPolicy(t *testing.T) {
 	rp := GetDefaultRP()
 	if rp == nil {
-		t.Fatalf("Default Retry Polic is nil")
+		t.Fatalf("Default Retry Policy is nil")
 	}
 
 	if rp.Attempts != defaultAttempts || rp.Initial != defaultInitialRetry || rp.Max != defauiltMaxRetry {
-		t.Fatal("Defauilt retry policy is not default")
+		t.Fatal("Default retry policy is not default")
 	}
 }
 
 func TestJobSuccess(t *testing.T) {
-	p := NewPool[int](2, fastRetry)
+	p := newTestPool(2)
 	defer p.Stop()
 
 	done := make(chan struct{})
@@ -37,7 +47,7 @@ func TestJobSuccess(t *testing.T) {
 			close(done)
 			return nil
 		},
-	})
+	}, 10) // priority
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -47,16 +57,18 @@ func TestJobSuccess(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("job did not complete")
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = p.Shutdown(ctx)
+
 	if got := p.ActiveWorkers(); got != 0 {
 		t.Fatalf("active workers = %d; want 0", got)
 	}
 }
 
 func TestRetryThenSuccess(t *testing.T) {
-	p := NewPool[int](1, fastRetry)
+	p := newTestPool(1)
 	defer p.Stop()
 
 	var attempts int32
@@ -76,7 +88,7 @@ func TestRetryThenSuccess(t *testing.T) {
 			close(done)
 			return nil
 		},
-	})
+	}, 10)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -93,7 +105,7 @@ func TestRetryThenSuccess(t *testing.T) {
 }
 
 func TestCancelDuringBackoff(t *testing.T) {
-	p := NewPool[int](1, fastRetry)
+	p := newTestPool(1)
 	defer p.Stop()
 
 	var attempts int32
@@ -109,7 +121,7 @@ func TestCancelDuringBackoff(t *testing.T) {
 			close(step)
 			return errors.New("boom")
 		},
-	})
+	}, 10)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -129,7 +141,7 @@ func TestCancelDuringBackoff(t *testing.T) {
 }
 
 func TestShutdownTimeout(t *testing.T) {
-	p := NewPool[int](1, fastRetry)
+	p := newTestPool(1)
 
 	started := make(chan struct{})
 	done := make(chan struct{})
@@ -143,7 +155,7 @@ func TestShutdownTimeout(t *testing.T) {
 			close(done)
 			return nil
 		},
-	})
+	}, 10)
 
 	<-started
 
@@ -161,19 +173,21 @@ func TestShutdownTimeout(t *testing.T) {
 }
 
 func TestSubmitAfterShutdown(t *testing.T) {
-	p := NewPool[int](1, fastRetry)
+	p := newTestPool(1)
 	_ = p.Shutdown(context.Background())
 
-	if ok := p.TrySubmit(Job[int]{Payload: 1, Ctx: context.Background(), Fn: func(int) error { return nil }}); ok {
-		t.Fatal("TrySubmit succeeded on closed pool; want false")
-	}
-	if err := p.Submit(Job[int]{Payload: 1, Ctx: context.Background(), Fn: func(int) error { return nil }}); err == nil {
+	// we don't have TrySubmit in the new API, so just check Submit
+	if err := p.Submit(Job[int]{
+		Payload: 1,
+		Ctx:     context.Background(),
+		Fn:      func(int) error { return nil },
+	}, 10); err == nil {
 		t.Fatal("Submit succeeded on closed pool; want error")
 	}
 }
 
 func TestPanicRecoveryAndCleanup(t *testing.T) {
-	p := NewPool[int](1, fastRetry)
+	p := newTestPool(1)
 	defer p.Stop()
 
 	var mu sync.Mutex
@@ -192,7 +206,7 @@ func TestPanicRecoveryAndCleanup(t *testing.T) {
 			cleaned++
 			mu.Unlock()
 		},
-	})
+	}, 10)
 
 	// second job should still run
 	_ = p.Submit(Job[int]{
@@ -207,7 +221,7 @@ func TestPanicRecoveryAndCleanup(t *testing.T) {
 			cleaned++
 			mu.Unlock()
 		},
-	})
+	}, 10)
 
 	select {
 	case <-secondDone:
@@ -222,5 +236,44 @@ func TestPanicRecoveryAndCleanup(t *testing.T) {
 	defer mu.Unlock()
 	if cleaned != 2 {
 		t.Fatalf("cleanup called %d times; want 2", cleaned)
+	}
+}
+
+func TestMetricsAndQueueLength(t *testing.T) {
+	p := newTestPool(1)
+	defer p.Stop()
+
+	// submit a quick job
+	_ = p.Submit(Job[int]{Payload: 1, Fn: func(n int) error { return nil }}, 10)
+
+	time.Sleep(20 * time.Millisecond)
+
+	m := p.Metrics()
+	if m.Submitted() == 0 { // if you export getter
+		t.Fatal("expected submitted > 0")
+	}
+
+	if p.QueueLength() < 0 {
+		t.Fatal("queue length should not be negative")
+	}
+}
+
+func TestFillDefaults(t *testing.T) {
+	var o Options
+	o.fillDefaults()
+	if o.Workers <= 0 || o.QueueSize <= 0 {
+		t.Fatal("defaults not filled")
+	}
+}
+
+func TestSubmitCanceledContext(t *testing.T) {
+	p := newTestPool(1)
+	defer p.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := p.Submit(Job[int]{Ctx: ctx, Fn: func(int) error { return nil }}, 1)
+	if err == nil {
+		t.Fatal("expected error when submitting with canceled context")
 	}
 }
