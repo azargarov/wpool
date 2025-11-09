@@ -109,8 +109,9 @@ func (p *Pool[T]) Stop() { _ = p.Shutdown(context.Background()) }
 // Submit returns an error if the pool has been shut down or if the job
 // context was already canceled.
 func (p *Pool[T]) Submit(job Job[T], basePrio float64) error {
-	if job.Ctx == nil {
-		job.Ctx = context.Background()
+	ctx := job.Ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	select {
@@ -124,12 +125,19 @@ func (p *Pool[T]) Submit(job Job[T], basePrio float64) error {
 		basePrio: basePrio,
 	}
 
+	// if already canceled -> return ctx.Err()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	select {
 	case p.submitCh <- req:
 		p.incSubmitted()
 		return nil
-	case <-job.Ctx.Done():
-		return job.Ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

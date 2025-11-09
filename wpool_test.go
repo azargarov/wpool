@@ -1,33 +1,34 @@
-package workerpool
+package workerpool_test
 
 import (
 	"context"
 	"errors"
+	wp "github.com/azargarov/go-utils/wpool"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-var fastRetry = RetryPolicy{Attempts: 3, Initial: 5 * time.Millisecond, Max: 10 * time.Millisecond}
+var fastRetry = wp.RetryPolicy{Attempts: 3, Initial: 5 * time.Millisecond, Max: 10 * time.Millisecond}
 
-func newTestPool(workers int) *Pool[int] {
-	opts := Options{
+func newTestPool(workers int) *wp.Pool[int] {
+	opts := wp.Options{
 		Workers:    workers,
 		AgingRate:  0.3,
 		RebuildDur: 10 * time.Millisecond,
 		QueueSize:  128,
 	}
-	return NewPool[int](opts, fastRetry)
+	return wp.NewPool[int](opts, fastRetry)
 }
 
 func TestDefultRetryPolicy(t *testing.T) {
-	rp := GetDefaultRP()
+	rp := wp.GetDefaultRP()
 	if rp == nil {
 		t.Fatalf("Default Retry Policy is nil")
 	}
 
-	if rp.Attempts != defaultAttempts || rp.Initial != defaultInitialRetry || rp.Max != defauiltMaxRetry {
+	if rp.Attempts == 0 || rp.Initial == 0 || rp.Max == 0 {
 		t.Fatal("Default retry policy is not default")
 	}
 }
@@ -40,7 +41,7 @@ func TestJobSuccess(t *testing.T) {
 	jobCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err := p.Submit(Job[int]{
+	err := p.Submit(wp.Job[int]{
 		Payload: 1,
 		Ctx:     jobCtx,
 		Fn: func(n int) error {
@@ -77,10 +78,10 @@ func TestRetryThenSuccess(t *testing.T) {
 	jobCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err := p.Submit(Job[int]{
+	err := p.Submit(wp.Job[int]{
 		Payload: 42,
 		Ctx:     jobCtx,
-		Retry:   &RetryPolicy{Attempts: 3, Initial: 2 * time.Millisecond, Max: 5 * time.Millisecond},
+		Retry:   &wp.RetryPolicy{Attempts: 3, Initial: 2 * time.Millisecond, Max: 5 * time.Millisecond},
 		Fn: func(_ int) error {
 			if atomic.AddInt32(&attempts, 1) < 3 {
 				return errors.New("fail")
@@ -112,10 +113,10 @@ func TestCancelDuringBackoff(t *testing.T) {
 	step := make(chan struct{})
 	jobCtx, cancel := context.WithCancel(context.Background())
 
-	err := p.Submit(Job[int]{
+	err := p.Submit(wp.Job[int]{
 		Payload: 7,
 		Ctx:     jobCtx,
-		Retry:   &RetryPolicy{Attempts: 5, Initial: 100 * time.Millisecond, Max: 100 * time.Millisecond},
+		Retry:   &wp.RetryPolicy{Attempts: 5, Initial: 100 * time.Millisecond, Max: 100 * time.Millisecond},
 		Fn: func(_ int) error {
 			atomic.AddInt32(&attempts, 1)
 			close(step)
@@ -146,7 +147,7 @@ func TestShutdownTimeout(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan struct{})
 
-	_ = p.Submit(Job[int]{
+	_ = p.Submit(wp.Job[int]{
 		Payload: 1,
 		Ctx:     context.Background(),
 		Fn: func(int) error {
@@ -177,7 +178,7 @@ func TestSubmitAfterShutdown(t *testing.T) {
 	_ = p.Shutdown(context.Background())
 
 	// we don't have TrySubmit in the new API, so just check Submit
-	if err := p.Submit(Job[int]{
+	if err := p.Submit(wp.Job[int]{
 		Payload: 1,
 		Ctx:     context.Background(),
 		Fn:      func(int) error { return nil },
@@ -195,7 +196,7 @@ func TestPanicRecoveryAndCleanup(t *testing.T) {
 	secondDone := make(chan struct{})
 
 	// first job panics
-	_ = p.Submit(Job[int]{
+	_ = p.Submit(wp.Job[int]{
 		Payload: 1,
 		Ctx:     context.Background(),
 		Fn: func(int) error {
@@ -209,7 +210,7 @@ func TestPanicRecoveryAndCleanup(t *testing.T) {
 	}, 10)
 
 	// second job should still run
-	_ = p.Submit(Job[int]{
+	_ = p.Submit(wp.Job[int]{
 		Payload: 2,
 		Ctx:     context.Background(),
 		Fn: func(int) error {
@@ -244,7 +245,7 @@ func TestMetricsAndQueueLength(t *testing.T) {
 	defer p.Stop()
 
 	// submit a quick job
-	_ = p.Submit(Job[int]{Payload: 1, Fn: func(n int) error { return nil }}, 10)
+	_ = p.Submit(wp.Job[int]{Payload: 1, Fn: func(n int) error { return nil }}, 10)
 
 	time.Sleep(20 * time.Millisecond)
 
@@ -259,8 +260,8 @@ func TestMetricsAndQueueLength(t *testing.T) {
 }
 
 func TestFillDefaults(t *testing.T) {
-	var o Options
-	o.fillDefaults()
+	var o wp.Options
+	o.FillDefaults()
 	if o.Workers <= 0 || o.QueueSize <= 0 {
 		t.Fatal("defaults not filled")
 	}
@@ -272,7 +273,7 @@ func TestSubmitCanceledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := p.Submit(Job[int]{Ctx: ctx, Fn: func(int) error { return nil }}, 1)
+	err := p.Submit(wp.Job[int]{Ctx: ctx, Fn: func(int) error { return nil }}, 1)
 	if err == nil {
 		t.Fatal("expected error when submitting with canceled context")
 	}

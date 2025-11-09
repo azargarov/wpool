@@ -24,7 +24,7 @@ type Options struct {
 	QueueSize int
 }
 
-func (o *Options) fillDefaults() {
+func (o *Options) FillDefaults() {
 	if o.Workers <= 0 {
 		o.Workers = 4
 	}
@@ -42,7 +42,7 @@ func (o *Options) fillDefaults() {
 // NewPool creates and starts a new Pool with the given options and a default
 // retry policy. Zero values in defaultRetry are filled with built-in defaults.
 func NewPool[T any](opts Options, defaultRetry RetryPolicy) *Pool[T] {
-	opts.fillDefaults()
+	opts.FillDefaults()
 
 	if defaultRetry.Attempts <= 0 {
 		defaultRetry.Attempts = defaultAttempts
