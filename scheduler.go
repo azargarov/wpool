@@ -1,7 +1,6 @@
 package workerpool
 
 import (
-	"container/heap"
 	"time"
 )
 
@@ -31,73 +30,113 @@ type submitReq[T any] struct {
 	//respCh    chan error // TODO: future blocking submit
 }
 
+// schedQueue defines the common behavior of all internal scheduler queues.
+//
+// A queue is responsible for storing pending jobs and determining
+// which one should be dispatched next. Different implementations
+// (such as FIFO or priority-based) define their own ordering logic.
+//
+// The scheduler goroutine interacts only through this interface,
+// making it easy to plug in alternative queueing strategies.
+type schedQueue[T any] interface {
+
+	// Push inserts a newly submitted job into the queue.
+	//
+	// basePrio is the user-provided priority value, and now is the
+	// enqueue timestamp. FIFO implementations can ignore both.
+	Push(job Job[T], basePrio float64, now time.Time)
+
+	// Pop retrieves and removes the next job to dispatch.
+	//
+	// It returns the selected job and a boolean flag indicating
+	// whether a job was available. If false, the queue is empty.
+	Pop(now time.Time) (Job[T], bool)
+
+	// Tick updates internal state periodically.
+	//
+	// Priority-based queues use it to apply *aging* (increasing
+	// effective priority with time), while FIFO queues typically
+	// implement it as a no-op.
+	Tick(now time.Time)
+
+	// Len returns the current number of jobs waiting in the queue.
+	//
+	// The scheduler uses this to update runtime metrics.
+	Len() int
+
+	// MaxAge reports the maximum waiting time among queued jobs.
+	//
+	// This metric helps track fairness and queue health. For FIFO
+	// queues or strategies that do not track age, it can safely
+	// return zero.
+	MaxAge() time.Duration
+}
+
+func (p *Pool[T]) makeQueue() schedQueue[T] {
+	switch p.opts.QT {
+	case Fifo:
+		return &fifoQueue[T]{}
+	case Priority:
+		return newPrioQueue[T](p.opts.AgingRate)
+	case Conditional:
+		// for now fall back to FIFO or implement later
+		return &fifoQueue[T]{}
+	default:
+		return &fifoQueue[T]{}
+	}
+}
+
 // scheduler is a dedicated goroutine that:
 //   - keeps jobs in a max-heap ordered by effective priority
 //   - periodically re-ages jobs so old ones bubble up
 //   - dispatches ready jobs to workers
 //   - drains the queue on shutdown
 func (p *Pool[T]) scheduler() {
-	var pq priorityQueue[T]
-	heap.Init(&pq)
+	q := p.makeQueue()
 
 	ticker := time.NewTicker(p.opts.RebuildDur)
 	defer ticker.Stop()
 
 loop:
 	for {
+		// first, try to dispatch if we have something
+		if job, ok := q.Pop(time.Now()); ok {
+			p.setQueued(q.Len())
+			p.dispatch(job)
+			continue
+		}
+
 		select {
 		case <-p.stopCh:
-			// pool is shutting down: flush everything we still have
-			for pq.Len() > 0 {
-				it := heap.Pop(&pq).(*item[T])
-				p.dispatch(it.job)
+			// drain queue
+			for {
+				job, ok := q.Pop(time.Now())
+				if !ok {
+					break
+				}
+				p.dispatch(job)
 			}
-			// no more work will be sent — close worker channel
 			close(p.workCh)
 			break loop
 
 		case req := <-p.submitCh:
-			// new job arrived — wrap it and push into heap
 			now := time.Now()
-			it := &item[T]{
-				job:      req.job,
-				basePrio: req.basePrio,
-				queuedAt: now,
-			}
-			it.eff = p.effective(it, now)
-			heap.Push(&pq, it)
-
+			q.Push(req.job, req.basePrio, now)
 			p.incSubmitted()
-			p.setQueued(pq.Len())
-
-		case <-ticker.C:
-			// periodic aging: recompute effective priority for all items
-			now := time.Now()
-			var maxAge time.Duration
-			for _, it := range pq {
-				age := now.Sub(it.queuedAt)
-				if age > maxAge {
-					maxAge = age
-				}
-				it.eff = p.effective(it, now)
+			p.setQueued(q.Len())
+			if age := q.MaxAge(); age > 0 {
+				p.setMaxAge(age)
 			}
-			p.setMaxAge(maxAge)
-
-			// heap order might have changed — rebuild
-			heap.Init(&pq)
-		default:
-			// no control signals — try to dispatch the best job if we have any
-			if pq.Len() > 0 {
-				it := heap.Pop(&pq).(*item[T])
-				p.setQueued(pq.Len())
-				p.dispatch(it.job)
-			} else {
-				// tiny sleep to avoid busy loop when there is no work
-				time.Sleep(5 * time.Millisecond)
+		case <-ticker.C:
+			now := time.Now()
+			q.Tick(now)
+			p.setQueued(q.Len())
+			if age := q.MaxAge(); age > 0 {
+				p.setMaxAge(age)
 			}
 		}
 	}
-	// tell Shutdown that scheduler is completely done
+
 	close(p.doneCh)
 }
 
@@ -109,11 +148,4 @@ func (p *Pool[T]) dispatch(job Job[T]) {
 		// if all workes are buissy - wait
 		p.workCh <- job
 	}
-}
-
-// effective computes the current effective priority of a job
-// based on its base priority and how long it has been waiting.
-func (p *Pool[T]) effective(it *item[T], now time.Time) float64 {
-	age := now.Sub(it.queuedAt).Seconds()
-	return it.basePrio + p.opts.AgingRate*age
 }

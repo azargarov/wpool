@@ -16,7 +16,7 @@ Module: `github.com/azargarov/go-utils/wpool`
 ##  Install
 
 ```bash
-go get github.com/azargarov/go-utils/wpool
+go get github.com/azargarov/go-utils/workerpool@v0.2.1
 ```
 
 ---
@@ -213,6 +213,12 @@ go test ./...
 ```
 
 ---
+## What's New in v0.2.1
+
+- Unified queue system — choose between **FIFO** and **Priority** scheduling.
+- Priority mode supports **aging** so older jobs bubble up fairly.
+- Clean, documented API with `QueueType` and `Options.FillDefaults()`.
+- Improved metrics: now reports **max job age** and **queue length**.
 
 ##  Related Packages
 

@@ -4,6 +4,29 @@ import (
 	"time"
 )
 
+const (
+	// Fifo represents a simple first-in–first-out queue.
+	// Jobs are executed strictly in the order they are submitted.
+	Fifo = iota
+
+	// Priority represents a priority queue that orders jobs
+	// by their effective priority, which increases over time
+	// according to the configured aging rate.
+	Priority
+
+	// Conditional is a placeholder for future scheduling strategies
+	// where dispatching logic may depend on job state or custom
+	// conditions. Currently behaves the same as Fifo.
+	Conditional
+)
+
+// QueueType defines the scheduling strategy used by the worker pool.
+//
+// Different queue types determine how jobs are ordered and selected
+// for execution by the scheduler. The type is configured via
+// Options.QueueType when creating a new Pool.
+type QueueType int
+
 // Options configure a worker Pool.
 //
 // All zero values are replaced with sensible defaults in fillDefaults.
@@ -22,8 +45,28 @@ type Options struct {
 	// QueueSize is the capacity of the submit channel — how many jobs can
 	// wait in front of the scheduler.
 	QueueSize int
+
+	// QT selects the scheduler queue type (FIFO, Priority, or Conditional).
+	//
+	// Use Fifo for simple first-in–first-out execution,
+	// Priority to enable aging-based priority scheduling,
+	// or Conditional for custom or experimental logic.
+	QT QueueType
 }
 
+// FillDefaults populates missing or zero-valued fields in Options
+// with sensible defaults.
+//
+// This method is automatically called by NewPool before creating
+// the worker pool. It ensures that all parameters have valid values
+// even if the caller provides only partial configuration.
+//
+// Default values:
+//   - Workers:     4
+//   - AgingRate:   0.3
+//   - RebuildDur:  200ms
+//   - QueueSize:   256
+//   - QT:          Fifo
 func (o *Options) FillDefaults() {
 	if o.Workers <= 0 {
 		o.Workers = 4
@@ -36,6 +79,9 @@ func (o *Options) FillDefaults() {
 	}
 	if o.QueueSize <= 0 {
 		o.QueueSize = 256
+	}
+	if o.QT == 0 {
+		o.QT = Fifo
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 
 func (p *Pool[T]) processJob(job Job[T]) {
 	logger := lg.FromContext(job.Ctx).With(lg.Any("job", job.Payload))
+	// TODO: implement logging
 	//logger.Info("Worker processing job", lg.Int32("active_workers", p.activeWorkers.Load()))
 
 	pol := p.defaultRetry
