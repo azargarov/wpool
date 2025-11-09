@@ -2,18 +2,18 @@
 
 **bounded-concurrency** worker pool for Go with:
 
-- 🎯 **Priority queue** in front of workers  
-- ⏳ **Aging** (old jobs bubble up automatically)  
-- 🔁 **Per-job retries** with context-aware backoff  
-- 🧩 **Panic-safe workers** and per-job cleanup  
-- 🕒 **Graceful shutdown** with deadlines  
-- 📊 **Metrics** (submitted, executed, active workers, max age)
+-  **Priority queue** in front of workers  
+-  **Aging** (old jobs bubble up automatically)  
+-  **Per-job retries** with context-aware backoff  
+-  **Panic-safe workers** and per-job cleanup  
+-  **Graceful shutdown** with deadlines  
+-  **Metrics** (submitted, executed, active workers, max age)
 
 Module: `github.com/azargarov/go-utils/wpool`
 
 ---
 
-## 🧩 Install
+##  Install
 
 ```bash
 go get github.com/azargarov/go-utils/wpool
@@ -21,7 +21,7 @@ go get github.com/azargarov/go-utils/wpool
 
 ---
 
-## 🚀 Quick start
+##  Quick start
 
 ```go
 package main
@@ -68,7 +68,7 @@ func main() {
 
 ---
 
-## ⚖️ Priority & Aging
+## Priority & Aging
 
 Each job has a **base priority** (`float64`).  
 The scheduler uses a **max-heap** and periodically “ages” queued jobs:
@@ -86,7 +86,7 @@ _ = pool.Submit(jobSlow, 1)   // low priority, but will age
 
 ---
 
-## 🔁 Per-job Retry Override
+##  Per-job Retry Override
 
 You can override the pool’s default retry policy per job:
 
@@ -109,7 +109,7 @@ Retries are **context-aware** — canceling the job’s context stops the backof
 
 ---
 
-## 🧨 Cancel During Backoff
+##  Cancel During Backoff
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -128,7 +128,7 @@ _ = pool.Submit(wp.Job[int]{
 
 ---
 
-## 🛑 Graceful Shutdown
+##  Graceful Shutdown
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -143,7 +143,7 @@ if err := pool.Shutdown(ctx); err != nil {
 
 ---
 
-## 📊 Metrics
+##  Metrics
 
 ```go
 m := pool.Metrics()
@@ -155,7 +155,7 @@ fmt.Println("queue length:", pool.QueueLength())
 
 ---
 
-## 🧠 API Overview
+##  API Overview
 
 ```go
 type Options struct {
@@ -190,7 +190,7 @@ func (p *Pool[T]) QueueLength() int
 
 ---
 
-## ⚙️ Design Highlights
+##  Design Highlights
 
 - **Bounded concurrency** — fixed worker count, controlled queue.  
 - **Scheduler** — priority heap + periodic “aging” of queued jobs.  
@@ -201,7 +201,7 @@ func (p *Pool[T]) QueueLength() int
 
 ---
 
-## 🧪 Testing
+##  Testing
 
 This package is test-friendly:
 - Tiny backoff values speed up unit tests.
@@ -214,7 +214,7 @@ go test ./...
 
 ---
 
-## 🧩 Related Packages
+##  Related Packages
 
 - [`backoff`](../backoff) — Exponential retry and delay generator  
 - [`zlog`](../zlog) — Structured logger (zap-based)  
