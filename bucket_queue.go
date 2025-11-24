@@ -67,15 +67,15 @@ func newBucketQueue[T any](aging float64, initialBSize int) *bucketQueue[T] {
 // NOTE: The aging logic here is intentionally *inverted* compared to
 // classical priority aging.
 //
-//   • In traditional aging models, waiting longer INCREASES a job’s priority.
-//   • In BucketQueue, lower scores map to HIGHER priority buckets.
+//   - In traditional aging models, waiting longer INCREASES a job’s priority.
+//   - In BucketQueue, lower scores map to HIGHER priority buckets.
 //
 // This means that although the score decreases over time, the *effective*
 // priority of the job actually goes UP.
 //
 // The formula:
 //
-//     score = basePrio - agingRate * seq
+//	score = basePrio - agingRate * seq
 //
 // works as follows:
 //   - `seq` is the logical age (position) of the job in the queue.
