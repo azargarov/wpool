@@ -1,48 +1,45 @@
 package workerpool
 
 import (
+	"sync/atomic"
 	"time"
 )
 
 // Metrics is a snapshot of pool internals useful for monitoring.
 // All fields are read-only through accessor methods.
 type Metrics struct {
-	submitted uint64
-	executed  uint64
-	queued    int
-	maxAge    time.Duration
-	active    map[int]bool
+	submitted     atomic.Uint64
+	executed      atomic.Uint64
+	queued        atomic.Int64
+	maxAge        time.Duration
+	workersActive []atomic.Bool
 }
 
 // Submitted returns the total number of jobs accepted by the pool.
-func (m Metrics) Submitted() uint64 { return m.submitted }
+func (m *Metrics) Submitted() uint64 { return m.submitted.Load() }
 
 // Metrics returns a copy of the current metrics snapshot.
-func (p *Pool[T]) Metrics() Metrics {
+func (p *Pool[T]) Metrics() *Metrics {
 	p.metricsMu.Lock()
 	defer p.metricsMu.Unlock()
-	return p.metrics
+	return &p.metrics
 }
 
 // Executed returns the total number of jobs processed by workers
 // (including canceled ones).
-func (m Metrics) Executed() uint64 { return m.executed }
+func (m *Metrics) Executed() uint64 { return m.executed.Load() }
 
 // SetWorkerState marks worker id as active/inactive. It is called internally
 // by the pool when workers start or stop.
 func (p *Pool[T]) SetWorkerState(id int, state bool) {
-	p.metricsMu.Lock()
-	defer p.metricsMu.Unlock()
-	p.metrics.active[id] = state
+	p.metrics.workersActive[id].Store(state)
 }
 
 // ActiveWorkers counts how many workers are currently marked active.
 func (p *Pool[T]) ActiveWorkers() int {
-	p.metricsMu.Lock()
-	defer p.metricsMu.Unlock()
 	count := 0
-	for _, v := range p.metrics.active {
-		if v {
+	for i := range p.metrics.workersActive {
+		if p.metrics.workersActive[i].Load() {
 			count++
 		}
 	}
@@ -50,21 +47,15 @@ func (p *Pool[T]) ActiveWorkers() int {
 }
 
 func (p *Pool[T]) incSubmitted() {
-	p.metricsMu.Lock()
-	defer p.metricsMu.Unlock()
-	p.metrics.submitted++
+	p.metrics.submitted.Add(1)
 }
 
 func (p *Pool[T]) incExecuted() {
-	p.metricsMu.Lock()
-	defer p.metricsMu.Unlock()
-	p.metrics.executed++
+	p.metrics.executed.Add(1)
 }
 
 func (p *Pool[T]) setQueued(n int) {
-	p.metricsMu.Lock()
-	defer p.metricsMu.Unlock()
-	p.metrics.queued = n
+	p.metrics.queued.Store(int64(n))
 }
 
 func (p *Pool[T]) setMaxAge(d time.Duration) {

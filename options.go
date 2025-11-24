@@ -1,13 +1,21 @@
 package workerpool
 
 import (
+	"sync/atomic"
 	"time"
 )
+
+// QueueType defines the scheduling strategy used by the worker pool.
+//
+// Different queue types determine how jobs are ordered and selected
+// for execution by the scheduler. The type is configured via
+// Options.QueueType when creating a new Pool.
+type QueueType int
 
 const (
 	// Fifo represents a simple first-in–first-out queue.
 	// Jobs are executed strictly in the order they are submitted.
-	Fifo = iota
+	Fifo QueueType = iota
 
 	// Priority represents a priority queue that orders jobs
 	// by their effective priority, which increases over time
@@ -18,14 +26,17 @@ const (
 	// where dispatching logic may depend on job state or custom
 	// conditions. Currently behaves the same as Fifo.
 	Conditional
-)
 
-// QueueType defines the scheduling strategy used by the worker pool.
-//
-// Different queue types determine how jobs are ordered and selected
-// for execution by the scheduler. The type is configured via
-// Options.QueueType when creating a new Pool.
-type QueueType int
+	// BucketQueue selects the fixed-range, O(1) bucket-based priority queue.
+	// Jobs are assigned to one of 100 priority buckets based on:
+	//
+	//     effective = basePriority - agingRate * seq
+	//
+	// where seq is a monotonically increasing insertion counter.
+	// This scheduler offers extremely fast push/pop, predictable behavior,
+	// and static aging without periodic rebalancing.
+	BucketQueue
+)
 
 // Options configure a worker Pool.
 //
@@ -85,6 +96,24 @@ func (o *Options) FillDefaults() {
 	}
 }
 
+// String returns a human-readable name for the queue type.
+// It is used in logs, metrics, and test output. Unknown values
+// return "Unknown".
+func (qt QueueType) String() string {
+	switch qt {
+	case Fifo:
+		return "Fifo"
+	case Priority:
+		return "Priority"
+	case Conditional:
+		return "Conditional"
+	case BucketQueue:
+		return "BucketQueue"
+	default:
+		return "Unknown"
+	}
+}
+
 // NewPool creates and starts a new Pool with the given options and a default
 // retry policy. Zero values in defaultRetry are filled with built-in defaults.
 func NewPool[T any](opts Options, defaultRetry RetryPolicy) *Pool[T] {
@@ -109,8 +138,7 @@ func NewPool[T any](opts Options, defaultRetry RetryPolicy) *Pool[T] {
 		closed:       make(chan struct{}),
 		defaultRetry: defaultRetry,
 	}
-
-	p.metrics.active = make(map[int]bool, opts.Workers)
+	p.metrics.workersActive = make([]atomic.Bool, opts.Workers)
 
 	for i := 0; i < opts.Workers; i++ {
 		p.wg.Add(1)

@@ -4,22 +4,41 @@ import (
 	"time"
 )
 
-// item is an element stored in the priority queue.
-// eff (effective priority) = basePrio + aging*age.
+const (
+	fifoCap = 1000
+)
+
+// item represents a scheduled job stored inside one of the internal
+// scheduler queues (heap-based or bucket-based).
+//
+// For the priority (heap) scheduler, an item carries its base priority,
+// enqueue timestamp, and its current effective priority (eff), which is
+// recomputed during aging. The container/heap implementation requires
+// that each item track its index within the heap.
+//
+// For the bucket-based scheduler, the prio field stores the discrete
+// bucket index assigned at insertion time.
 type item[T any] struct {
+	// job is the actual job payload and execution function.
 	job Job[T]
 
-	// user-provided priority on submit
+	// basePrio is the user-provided priority value supplied at Submit time.
 	basePrio float64
 
-	// when the job entered the scheduler
+	// queuedAt records when the job entered the scheduler.
+	// Used for aging in the priority (heap) scheduler.
 	queuedAt time.Time
 
-	// effective priority used by the heap
+	// eff is the effective priority computed from basePrio and job age.
+	// It is used only by the heap-based priority queue.
 	eff float64
 
-	// heap index (required by container/heap)
+	// index is maintained by the heap-based queue. It stores the element’s
+	// current position in the heap and is required by the heap.Interface.
 	index int
+
+	// prio is the discrete bucket index used by the bucket-based queue.
+	prio Prio
 }
 
 // submitReq is what the pool feeds into the scheduler.
@@ -75,14 +94,18 @@ type schedQueue[T any] interface {
 func (p *Pool[T]) makeQueue() schedQueue[T] {
 	switch p.opts.QT {
 	case Fifo:
-		return &fifoQueue[T]{}
+		return newFifoQueue[T](fifoCap)
 	case Priority:
 		return newPrioQueue[T](p.opts.AgingRate)
 	case Conditional:
-		// for now fall back to FIFO or implement later
-		return &fifoQueue[T]{}
+		// for now fall back to FIFO
+		return newFifoQueue[T](fifoCap)
+	case BucketQueue:
+		return newBucketQueue[T](p.opts.AgingRate, initialBucketSize)
+
 	default:
-		return &fifoQueue[T]{}
+		return newFifoQueue[T](fifoCap)
+
 	}
 }
 
@@ -99,7 +122,6 @@ func (p *Pool[T]) scheduler() {
 
 loop:
 	for {
-		// first, try to dispatch if we have something
 		if job, ok := q.Pop(time.Now()); ok {
 			p.setQueued(q.Len())
 			p.dispatch(job)

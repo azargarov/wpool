@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+const (
+	prioCap = 2048
+)
+
 // prioQueue implements a priority-based job queue used by the scheduler.
 // Jobs are ordered by their *effective priority* which increases over time
 // according to the configured aging rate. Older jobs naturally bubble up
@@ -20,6 +24,7 @@ type prioQueue[T any] struct {
 // relative to their waiting time.
 func newPrioQueue[T any](agingRate float64) *prioQueue[T] {
 	q := &prioQueue[T]{agingRate: agingRate}
+	q.pq = make(priorityQueue[T], 0, prioCap) // preallocate
 	heap.Init(&q.pq)
 	return q
 }
@@ -29,12 +34,12 @@ func newPrioQueue[T any](agingRate float64) *prioQueue[T] {
 // Each job is wrapped in an item that stores its base priority,
 // enqueue timestamp, and computed effective priority.
 func (p *prioQueue[T]) Push(job Job[T], basePrio float64, now time.Time) {
-	it := &item[T]{
+	it := item[T]{
 		job:      job,
 		basePrio: basePrio,
 		queuedAt: now,
 	}
-	it.eff = effective(it, p.agingRate, now)
+	it.eff = effective(&it, p.agingRate, now)
 	heap.Push(&p.pq, it)
 }
 
@@ -44,24 +49,31 @@ func (p *prioQueue[T]) Pop(_ time.Time) (Job[T], bool) {
 	if p.pq.Len() == 0 {
 		return Job[T]{}, false
 	}
-	it := heap.Pop(&p.pq).(*item[T])
+	it := heap.Pop(&p.pq).(item[T])
 	return it.job, true
 }
 
-// Tick recalculates effective priorities for all queued jobs.
+// Tick recalculates the effective priority of all queued jobs.
 //
-// This method should be called periodically by the scheduler to apply
-// *aging*: as jobs wait in the queue, their effective priority grows.
-// The queue is then re-heapified to restore proper ordering.
+// This method is called periodically by the scheduler. For each job,
+// Tick updates its effective priority based on its waiting time and the
+// configured aging rate. Older jobs gain priority and naturally rise
+// toward the top of the heap, preventing starvation.
+//
+// After all priorities are updated, the heap is reinitialized to restore
+// correct ordering. The maximum observed job age is stored in maxAge and
+// used for metrics reporting.
+//
+// Tick runs in O(n) time, where n is the number of queued jobs.
 func (p *prioQueue[T]) Tick(now time.Time) {
 	var maxAge time.Duration
 
-	for _, it := range p.pq {
-		age := now.Sub(it.queuedAt)
+	for i := range p.pq {
+		age := now.Sub(p.pq[i].queuedAt)
 		if age > maxAge {
 			maxAge = age
 		}
-		it.eff = effective(it, p.agingRate, now)
+		p.pq[i].eff = effective(&p.pq[i], p.agingRate, now)
 	}
 
 	p.maxAge = maxAge

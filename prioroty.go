@@ -5,7 +5,7 @@ package workerpool
 // It implements the container/heap interface and provides the core data
 // structure used by prioQueue. Higher effective priority values are
 // considered "larger" and therefore bubble to the top of the heap.
-type priorityQueue[T any] []*item[T]
+type priorityQueue[T any] []item[T]
 
 // Len returns the number of items currently stored in the heap.
 func (pq priorityQueue[T]) Len() int { return len(pq) }
@@ -30,7 +30,7 @@ func (pq priorityQueue[T]) Swap(i, j int) {
 // This method is required by the container/heap interface and should not be
 // called directly; use heap.Push(&pq, x) instead.
 func (pq *priorityQueue[T]) Push(x any) {
-	it := x.(*item[T])
+	it := x.(item[T])
 	it.index = len(*pq)
 	*pq = append(*pq, it)
 }
@@ -43,8 +43,8 @@ func (pq *priorityQueue[T]) Pop() any {
 	old := *pq
 	n := len(old)
 	it := old[n-1]
-	old[n-1] = nil // avoid memory leak
-	it.index = -1  // mark as removed
+	//old[n-1] = nil // avoid memory leak
+	it.index = -1 // mark as removed
 	*pq = old[:n-1]
 	return it
 }

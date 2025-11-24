@@ -7,7 +7,12 @@ import (
 )
 
 func (p *Pool[T]) processJob(job Job[T]) {
-	logger := lg.FromContext(job.Ctx).With(lg.Any("job", job.Payload))
+	var logger lg.ZLogger
+	if job.Ctx != nil {
+		logger = lg.FromContext(job.Ctx).With(lg.Any("job", job.Payload))
+	} else {
+		logger = lg.NewDiscard()
+	}
 	// TODO: implement logging
 	//logger.Info("Worker processing job", lg.Int32("active_workers", p.activeWorkers.Load()))
 
@@ -23,6 +28,12 @@ func (p *Pool[T]) processJob(job Job[T]) {
 		if job.Retry.Max > 0 {
 			pol.Max = job.Retry.Max
 		}
+	}
+
+	// skip backoff if Attempts = 1
+	if pol.Attempts <= 1 {
+		job.Fn(job.Payload)
+		return
 	}
 
 	bo := boff.New(pol.Initial, pol.Max, time.Now().UnixNano())

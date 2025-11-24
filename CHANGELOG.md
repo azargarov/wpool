@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [v0.2.2] - 2025-11-19
+### Added
+- New `BucketQueue` scheduler: fixed-range, O(1) bucket-based priority queue.
+- Full GoDoc documentation for `bucketQueue` and related scheduling logic.
+
+### Fixed
+- Corrected length tracking in BucketQueue pop path.
+- Added overflow guard for sequence counter (`seq`).
 
 ## [v0.2.1] - 2025-11-09
 ### Added
