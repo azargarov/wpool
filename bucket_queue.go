@@ -28,6 +28,10 @@ type Prio int
 // periodic re-aging: the priority decay is computed using a monotonically
 // increasing sequence number. Older jobs effectively get pushed into
 // lower buckets, ensuring fairness while maintaining O(1) push/pop.
+//
+// NOTE: bucketQueue is NOT thread-safe.
+// It assumes all operations occur from a single scheduler goroutine.
+// Push and Pop must never be called concurrently from multiple goroutines.
 type bucketQueue[T any] struct {
 	buckets [][]item[T] // array of buckets
 	maxPrio Prio        // highest bucket currently containing jobs
@@ -57,13 +61,32 @@ func newBucketQueue[T any](aging float64, initialBSize int) *bucketQueue[T] {
 	}
 }
 
-// computeBucket returns the discrete bucket index for a job.
+// computeBucket calculates the “aging” score for a job and maps it into a
+// discrete bucket index.
 //
-// The "score" is calculated as:
+// NOTE: The aging logic here is intentionally *inverted* compared to
+// classical priority aging.
 //
-//	score = basePrio - agingRate * seq
+//   • In traditional aging models, waiting longer INCREASES a job’s priority.
+//   • In BucketQueue, lower scores map to HIGHER priority buckets.
 //
-// The score is then clamped to the [minPriority, maxPriority] range.
+// This means that although the score decreases over time, the *effective*
+// priority of the job actually goes UP.
+//
+// The formula:
+//
+//     score = basePrio - agingRate * seq
+//
+// works as follows:
+//   - `seq` is the logical age (position) of the job in the queue.
+//   - As `seq` grows, `score` decreases.
+//   - Lower `score` → higher priority bucket → job is processed sooner.
+//
+// Intuition:
+//   - Fresh job: high score  → lower priority → placed in a later bucket.
+//   - Old job:   low score   → higher priority → pulled forward.
+//
+// Finally, the score is clamped to the [minPriority, maxPriority] range.
 func computeBucket(base, rate float64, seq uint64) Prio {
 	score := base - rate*float64(seq)
 
