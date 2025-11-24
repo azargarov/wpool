@@ -4,10 +4,6 @@ import (
 	"time"
 )
 
-const (
-	fifoCap = 1000
-)
-
 // item represents a scheduled job stored inside one of the internal
 // scheduler queues (heap-based or bucket-based).
 //
@@ -94,17 +90,17 @@ type schedQueue[T any] interface {
 func (p *Pool[T]) makeQueue() schedQueue[T] {
 	switch p.opts.QT {
 	case Fifo:
-		return newFifoQueue[T](fifoCap)
+		return newFifoQueue[T](initialFifoCapacity)
 	case Priority:
 		return newPrioQueue[T](p.opts.AgingRate)
 	case Conditional:
 		// for now fall back to FIFO
-		return newFifoQueue[T](fifoCap)
+		return newFifoQueue[T](initialFifoCapacity)
 	case BucketQueue:
 		return newBucketQueue[T](p.opts.AgingRate, initialBucketSize)
 
 	default:
-		return newFifoQueue[T](fifoCap)
+		return newFifoQueue[T](initialFifoCapacity)
 
 	}
 }

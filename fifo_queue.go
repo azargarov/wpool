@@ -3,6 +3,10 @@ package workerpool
 
 import "time"
 
+const (
+	initialFifoCapacity = 1000
+)
+
 // fifoQueue implements a simple fixed-capacity first-in–first-out job queue.
 //
 // It satisfies the schedQueue[T] interface used by the scheduler.
