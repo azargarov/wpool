@@ -141,15 +141,12 @@ func NewPool[T any](opts Options, defaultRetry RetryPolicy) *Pool[T] {
 	p.metrics.workersActive = make([]atomic.Bool, opts.Workers)
 
 	for i := 0; i < opts.Workers; i++ {
-		p.wg.Add(1)
 		go func(id int) {
-			defer p.wg.Done()
 			p.worker(id)
 		}(i)
 		p.SetWorkerState(i, true)
 	}
 
-	// scheduler
 	go p.scheduler()
 
 	return p

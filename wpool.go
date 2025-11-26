@@ -44,7 +44,6 @@ type Job[T any] struct {
 // Pool is a bounded worker pool with a priority scheduler in front of it.
 // Jobs are first submitted to the scheduler and then dispatched to workers.
 type Pool[T any] struct {
-	wg           sync.WaitGroup
 	stopOnce     sync.Once
 	closed       chan struct{} // signals no more submissions
 	defaultRetry RetryPolicy
@@ -65,7 +64,7 @@ type Pool[T any] struct {
 func (p *Pool[T]) Shutdown(ctx context.Context) error {
 	p.stopOnce.Do(func() {
 		// tell scheduler to stop
-		close(p.stopCh)
+		p.stopCh <- struct{}{}
 		// also block new submits
 		close(p.closed)
 	})
@@ -86,7 +85,9 @@ func (p *Pool[T]) Shutdown(ctx context.Context) error {
 	// wait for workers
 	doneWorkers := make(chan struct{})
 	go func() {
-		p.wg.Wait()
+		for p.ActiveWorkers() != 0 {
+			time.Sleep(0)
+		}
 		close(doneWorkers)
 	}()
 
@@ -154,7 +155,7 @@ func (p *Pool[T]) worker(id int) {
 			}
 		}
 
-		p.wg.Add(1)
+		//p.wg.Add(1)
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -166,7 +167,7 @@ func (p *Pool[T]) worker(id int) {
 			}()
 			p.processJob(job)
 		}()
-		p.wg.Done()
+		//p.wg.Done()
 		p.incExecuted()
 	}
 	p.SetWorkerState(id, false)
