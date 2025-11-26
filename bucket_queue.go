@@ -1,9 +1,8 @@
 package workerpool
 
 import (
-    "time"
-    "math/bits"
-
+	"math/bits"
+	"time"
 )
 
 const (
@@ -43,7 +42,7 @@ type bucketQueue[T any] struct {
 	aging   float64     // aging rate applied via computeBucket
 	seq     uint64      // insertion counter for age-based decay
 	length  int         // total items across all buckets
-    bitmap  uint64
+	bitmap  uint64
 }
 
 // newBucketQueue allocates a new bucket-based priority queue.
@@ -114,7 +113,7 @@ func (q *bucketQueue[T]) Push(job Job[T], basePrio float64, now time.Time) {
 	seq := q.seq
 	q.seq++
 	if q.seq == 0 {
-		// Handle potential wrap, unlikely 
+		// Handle potential wrap, unlikely
 		q.seq = 1
 	}
 
@@ -135,7 +134,7 @@ func (q *bucketQueue[T]) Push(job Job[T], basePrio float64, now time.Time) {
 	}
 
 	q.buckets[idx] = append(q.buckets[idx], it)
-    q.bitmap |= (1 << uint(prio))
+	q.bitmap |= (1 << uint(prio))
 	q.length++
 
 	if prio > q.maxPrio {
@@ -148,29 +147,29 @@ func (q *bucketQueue[T]) Push(job Job[T], basePrio float64, now time.Time) {
 // The queue scans downward from maxPrio until it finds a non-empty bucket.
 // Since maxPrio is updated eagerly, the scan is typically only one bucket.
 func (q *bucketQueue[T]) Pop(_ time.Time) (Job[T], bool) {
-    if q.bitmap == 0 {
-        return Job[T]{}, false
-    }
+	if q.bitmap == 0 {
+		return Job[T]{}, false
+	}
 
-    idx := bits.TrailingZeros64(q.bitmap)
-    bucket := &q.buckets[idx]
-    n := len(*bucket)
-    if n == 0 {
-        q.bitmap &^= 1 << uint(idx)
-        return Job[T]{}, false
-    }
+	idx := bits.TrailingZeros64(q.bitmap)
+	bucket := &q.buckets[idx]
+	n := len(*bucket)
+	if n == 0 {
+		q.bitmap &^= 1 << uint(idx)
+		return Job[T]{}, false
+	}
 
-    // pop last element
-    it := (*bucket)[n-1]
-    *bucket = (*bucket)[:n-1]
-    q.length--
+	// pop last element
+	it := (*bucket)[n-1]
+	*bucket = (*bucket)[:n-1]
+	q.length--
 
-    // empty backet → clear bit
-    if len(*bucket) == 0 {
-        q.bitmap &^= 1 << uint(idx)
-    }
+	// empty backet → clear bit
+	if len(*bucket) == 0 {
+		q.bitmap &^= 1 << uint(idx)
+	}
 
-    return it.job, true
+	return it.job, true
 }
 
 // Tick is a no-op for bucketQueue, since aging is computed at insertion.

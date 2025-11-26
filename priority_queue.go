@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	prioCap = 2048
+	initiaPrioCapacity = 2048
 )
 
 // prioQueue implements a priority-based job queue used by the scheduler.
@@ -24,7 +24,7 @@ type prioQueue[T any] struct {
 // relative to their waiting time.
 func newPrioQueue[T any](agingRate float64) *prioQueue[T] {
 	q := &prioQueue[T]{agingRate: agingRate}
-	q.pq = make(priorityQueue[T], 0, prioCap) // preallocate
+	q.pq = make(priorityQueue[T], 0, initiaPrioCapacity) // preallocate
 	heap.Init(&q.pq)
 	return q
 }
