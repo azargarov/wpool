@@ -69,7 +69,7 @@ func (p *Pool[T]) Shutdown(ctx context.Context) error {
 		close(p.closed)
 	})
 
-	// wait for scheduler to say "I'm done dispatching"
+	// stop scheduler
 	doneSched := make(chan struct{})
 	go func() {
 		<-p.doneCh // scheduler closes this at the end

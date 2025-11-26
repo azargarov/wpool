@@ -12,6 +12,8 @@
 Module: `github.com/azargarov/go-utils/wpool`
 
 ---
+<!-- BENCHMARKS:START -->
+<!-- BENCHMARKS:END -->
 
 ##  Install
 
