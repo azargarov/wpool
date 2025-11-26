@@ -1,14 +1,19 @@
 package workerpool
 
-import "time"
+import (
+    "time"
+    "math/bits"
+
+)
 
 const (
 	// minPriority is the lowest possible priority bucket index.
-	minPriority = 0
+	BQminPriority = 0
 
 	// maxPriority is the highest bucket index. The queue contains
 	// maxPriority - minPriority + 1 buckets.
-	maxPriority = 99
+	// limited by uint64 - 64 bits
+	BQmaxPriority = 60
 
 	// initialBucketSize pre-allocates each bucket with this capacity.
 	// This helps reduce allocations under heavy load.
@@ -38,6 +43,7 @@ type bucketQueue[T any] struct {
 	aging   float64     // aging rate applied via computeBucket
 	seq     uint64      // insertion counter for age-based decay
 	length  int         // total items across all buckets
+    bitmap  uint64
 }
 
 // newBucketQueue allocates a new bucket-based priority queue.
@@ -45,7 +51,7 @@ type bucketQueue[T any] struct {
 // aging controls how fast priorities decay as seq grows.
 // initialBSize sets the per-bucket initial capacity.
 func newBucketQueue[T any](aging float64, initialBSize int) *bucketQueue[T] {
-	size := maxPriority - minPriority + 1
+	size := BQmaxPriority - BQminPriority + 1
 	buckets := make([][]item[T], size)
 
 	if initialBSize > 0 {
@@ -56,7 +62,7 @@ func newBucketQueue[T any](aging float64, initialBSize int) *bucketQueue[T] {
 
 	return &bucketQueue[T]{
 		buckets: buckets,
-		maxPrio: minPriority,
+		maxPrio: BQminPriority,
 		aging:   aging,
 	}
 }
@@ -68,7 +74,7 @@ func newBucketQueue[T any](aging float64, initialBSize int) *bucketQueue[T] {
 // classical priority aging.
 //
 //   - In traditional aging models, waiting longer INCREASES a job’s priority.
-//   - In BucketQueue, lower scores map to HIGHER priority buckets.
+//   - In BucketQueue, lower scores map to HIGHER priority buckets (bucket 0 = highest priority)
 //
 // This means that although the score decreases over time, the *effective*
 // priority of the job actually goes UP.
@@ -90,11 +96,11 @@ func newBucketQueue[T any](aging float64, initialBSize int) *bucketQueue[T] {
 func computeBucket(base, rate float64, seq uint64) Prio {
 	score := base - rate*float64(seq)
 
-	if score < minPriority {
-		score = minPriority
+	if score < BQminPriority {
+		score = BQminPriority
 	}
-	if score > maxPriority {
-		score = maxPriority
+	if score > BQmaxPriority {
+		score = BQmaxPriority
 	}
 
 	return Prio(score)
@@ -108,7 +114,7 @@ func (q *bucketQueue[T]) Push(job Job[T], basePrio float64, now time.Time) {
 	seq := q.seq
 	q.seq++
 	if q.seq == 0 {
-		// Handle potential wrap, extremely unlikely but principled.
+		// Handle potential wrap, unlikely 
 		q.seq = 1
 	}
 
@@ -122,13 +128,14 @@ func (q *bucketQueue[T]) Push(job Job[T], basePrio float64, now time.Time) {
 	}
 
 	idx := int(prio)
-	if idx < minPriority {
-		idx = minPriority
-	} else if idx > maxPriority {
-		idx = maxPriority
+	if idx < BQminPriority {
+		idx = BQminPriority
+	} else if idx > BQmaxPriority {
+		idx = BQmaxPriority
 	}
 
 	q.buckets[idx] = append(q.buckets[idx], it)
+    q.bitmap |= (1 << uint(prio))
 	q.length++
 
 	if prio > q.maxPrio {
@@ -141,24 +148,29 @@ func (q *bucketQueue[T]) Push(job Job[T], basePrio float64, now time.Time) {
 // The queue scans downward from maxPrio until it finds a non-empty bucket.
 // Since maxPrio is updated eagerly, the scan is typically only one bucket.
 func (q *bucketQueue[T]) Pop(_ time.Time) (Job[T], bool) {
-	for p := q.maxPrio; p >= minPriority; p-- {
-		idx := int(p)
-		if len(q.buckets[idx]) > 0 {
-			n := len(q.buckets[idx]) - 1
-			it := q.buckets[idx][n]
-			q.buckets[idx] = q.buckets[idx][:n]
-			q.length--
+    if q.bitmap == 0 {
+        return Job[T]{}, false
+    }
 
-			// If this bucket is now empty, update maxPrio.
-			if len(q.buckets[idx]) == 0 && p == q.maxPrio {
-				for q.maxPrio > minPriority && len(q.buckets[q.maxPrio]) == 0 {
-					q.maxPrio--
-				}
-			}
-			return it.job, true
-		}
-	}
-	return Job[T]{}, false
+    idx := bits.TrailingZeros64(q.bitmap)
+    bucket := &q.buckets[idx]
+    n := len(*bucket)
+    if n == 0 {
+        q.bitmap &^= 1 << uint(idx)
+        return Job[T]{}, false
+    }
+
+    // pop last element
+    it := (*bucket)[n-1]
+    *bucket = (*bucket)[:n-1]
+    q.length--
+
+    // empty backet → clear bit
+    if len(*bucket) == 0 {
+        q.bitmap &^= 1 << uint(idx)
+    }
+
+    return it.job, true
 }
 
 // Tick is a no-op for bucketQueue, since aging is computed at insertion.
