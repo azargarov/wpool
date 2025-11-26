@@ -3,26 +3,40 @@ package workerpool_test
 import (
 	"context"
 	"errors"
-	wp "github.com/azargarov/go-utils/wpool"
+	//"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	wp "github.com/azargarov/go-utils/wpool"
 )
 
-var fastRetry = wp.RetryPolicy{Attempts: 3, Initial: 5 * time.Millisecond, Max: 10 * time.Millisecond}
+var fastRetry = wp.RetryPolicy{
+	Attempts: 3,
+	Initial:  5 * time.Millisecond,
+	Max:      10 * time.Millisecond,
+}
 
-func newTestPool(workers int) *wp.Pool[int] {
+var queueTypes = []wp.QueueType{
+	wp.Fifo,
+	//wp.Priority,
+	//wp.Conditional,
+	wp.BucketQueue,
+}
+
+func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int] {
 	opts := wp.Options{
 		Workers:    workers,
 		AgingRate:  0.3,
 		RebuildDur: 10 * time.Millisecond,
-		QueueSize:  128,
+		QueueSize:  4_000_000,
+		QT:         qt,
 	}
 	return wp.NewPool[int](opts, fastRetry)
 }
 
-func TestDefultRetryPolicy(t *testing.T) {
+func TestDefaultRetryPolicy(t *testing.T) {
 	rp := wp.GetDefaultRP()
 	if rp == nil {
 		t.Fatalf("Default Retry Policy is nil")
@@ -33,8 +47,71 @@ func TestDefultRetryPolicy(t *testing.T) {
 	}
 }
 
-func TestJobSuccess(t *testing.T) {
-	p := newTestPool(2)
+func TestFillDefaults(t *testing.T) {
+	var o wp.Options
+	o.FillDefaults()
+	if o.Workers <= 0 || o.QueueSize <= 0 {
+		t.Fatal("defaults not filled")
+	}
+}
+
+func TestPoolQueues(t *testing.T) {
+	for _, qt := range queueTypes {
+		qt := qt // capture range variable
+		t.Run(qt.String(), func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("JobSuccess", func(t *testing.T) {
+				t.Parallel()
+				jobSuccess(t, qt)
+			})
+
+			t.Run("RetryThenSuccess", func(t *testing.T) {
+				t.Parallel()
+				retryThenSuccess(t, qt)
+			})
+
+			t.Run("CancelDuringBackoff", func(t *testing.T) {
+				t.Parallel()
+				cancelDuringBackoff(t, qt)
+			})
+
+			t.Run("ShutdownTimeout", func(t *testing.T) {
+				t.Parallel()
+				shutdownTimeout(t, qt)
+			})
+
+			t.Run("SubmitAfterShutdown", func(t *testing.T) {
+				t.Parallel()
+				submitAfterShutdown(t, qt)
+			})
+
+			t.Run("PanicRecoveryAndCleanup", func(t *testing.T) {
+				t.Parallel()
+				panicRecoveryAndCleanup(t, qt)
+			})
+
+			t.Run("MetricsAndQueueLength", func(t *testing.T) {
+				t.Parallel()
+				metricsAndQueueLength(t, qt)
+			})
+
+			t.Run("SubmitCanceledContext", func(t *testing.T) {
+				t.Parallel()
+				submitCanceledContext(t, qt)
+			})
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Helper test functions (one scenario, parameterized by queue type)
+// -----------------------------------------------------------------------------
+
+func jobSuccess(t *testing.T, qt wp.QueueType) {
+	t.Helper()
+
+	p := newTestPool(1, qt)
 	defer p.Stop()
 
 	done := make(chan struct{})
@@ -48,7 +125,7 @@ func TestJobSuccess(t *testing.T) {
 			close(done)
 			return nil
 		},
-	}, 10) // priority
+	}, 10)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -56,7 +133,7 @@ func TestJobSuccess(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("job did not complete")
+		t.Fatal("job did not complete in time")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -68,8 +145,10 @@ func TestJobSuccess(t *testing.T) {
 	}
 }
 
-func TestRetryThenSuccess(t *testing.T) {
-	p := newTestPool(1)
+func retryThenSuccess(t *testing.T, qt wp.QueueType) {
+	t.Helper()
+
+	p := newTestPool(1, qt)
 	defer p.Stop()
 
 	var attempts int32
@@ -97,7 +176,7 @@ func TestRetryThenSuccess(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(1 * time.Second):
-		t.Fatal("job did not succeed after retries")
+		t.Fatal("job did not succeed after retries in time")
 	}
 
 	if got := atomic.LoadInt32(&attempts); got != 3 {
@@ -105,13 +184,17 @@ func TestRetryThenSuccess(t *testing.T) {
 	}
 }
 
-func TestCancelDuringBackoff(t *testing.T) {
-	p := newTestPool(1)
+func cancelDuringBackoff(t *testing.T, qt wp.QueueType) {
+	t.Helper()
+
+	p := newTestPool(1, qt)
 	defer p.Stop()
 
 	var attempts int32
 	step := make(chan struct{})
 	jobCtx, cancel := context.WithCancel(context.Background())
+
+	var once sync.Once
 
 	err := p.Submit(wp.Job[int]{
 		Payload: 7,
@@ -119,7 +202,7 @@ func TestCancelDuringBackoff(t *testing.T) {
 		Retry:   &wp.RetryPolicy{Attempts: 5, Initial: 100 * time.Millisecond, Max: 100 * time.Millisecond},
 		Fn: func(_ int) error {
 			atomic.AddInt32(&attempts, 1)
-			close(step)
+			once.Do(func() { close(step) })
 			return errors.New("boom")
 		},
 	}, 10)
@@ -135,14 +218,17 @@ func TestCancelDuringBackoff(t *testing.T) {
 	}
 	cancel()
 
-	time.Sleep(50 * time.Millisecond) // allow worker to observe cancel
+	// small wait so worker can observe cancel and exit backoff
+	time.Sleep(50 * time.Millisecond)
 	if got := atomic.LoadInt32(&attempts); got != 1 {
 		t.Fatalf("attempts after cancel = %d; want 1", got)
 	}
 }
 
-func TestShutdownTimeout(t *testing.T) {
-	p := newTestPool(1)
+func shutdownTimeout(t *testing.T, qt wp.QueueType) {
+	t.Helper()
+
+	p := newTestPool(1, qt)
 
 	started := make(chan struct{})
 	done := make(chan struct{})
@@ -158,7 +244,11 @@ func TestShutdownTimeout(t *testing.T) {
 		},
 	}, 10)
 
-	<-started
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("job did not start in time")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
@@ -167,17 +257,23 @@ func TestShutdownTimeout(t *testing.T) {
 		t.Fatalf("Shutdown err = %v; want deadline exceeded", err)
 	}
 
-	<-done
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("job did not finish after shutdown timeout")
+	}
+
 	if err := p.Shutdown(context.Background()); err != nil {
 		t.Fatalf("second Shutdown err = %v; want nil", err)
 	}
 }
 
-func TestSubmitAfterShutdown(t *testing.T) {
-	p := newTestPool(1)
+func submitAfterShutdown(t *testing.T, qt wp.QueueType) {
+	t.Helper()
+
+	p := newTestPool(1, qt)
 	_ = p.Shutdown(context.Background())
 
-	// we don't have TrySubmit in the new API, so just check Submit
 	if err := p.Submit(wp.Job[int]{
 		Payload: 1,
 		Ctx:     context.Background(),
@@ -187,8 +283,10 @@ func TestSubmitAfterShutdown(t *testing.T) {
 	}
 }
 
-func TestPanicRecoveryAndCleanup(t *testing.T) {
-	p := newTestPool(1)
+func panicRecoveryAndCleanup(t *testing.T, qt wp.QueueType) {
+	t.Helper()
+
+	p := newTestPool(1, qt)
 	defer p.Stop()
 
 	var mu sync.Mutex
@@ -240,17 +338,18 @@ func TestPanicRecoveryAndCleanup(t *testing.T) {
 	}
 }
 
-func TestMetricsAndQueueLength(t *testing.T) {
-	p := newTestPool(1)
+func metricsAndQueueLength(t *testing.T, qt wp.QueueType) {
+	t.Helper()
+
+	p := newTestPool(1, qt)
 	defer p.Stop()
 
-	// submit a quick job
 	_ = p.Submit(wp.Job[int]{Payload: 1, Fn: func(n int) error { return nil }}, 10)
 
 	time.Sleep(20 * time.Millisecond)
 
 	m := p.Metrics()
-	if m.Submitted() == 0 { // if you export getter
+	if m.Submitted() == 0 {
 		t.Fatal("expected submitted > 0")
 	}
 
@@ -259,21 +358,19 @@ func TestMetricsAndQueueLength(t *testing.T) {
 	}
 }
 
-func TestFillDefaults(t *testing.T) {
-	var o wp.Options
-	o.FillDefaults()
-	if o.Workers <= 0 || o.QueueSize <= 0 {
-		t.Fatal("defaults not filled")
-	}
-}
+func submitCanceledContext(t *testing.T, qt wp.QueueType) {
+	t.Helper()
 
-func TestSubmitCanceledContext(t *testing.T) {
-	p := newTestPool(1)
+	p := newTestPool(1, qt)
 	defer p.Stop()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := p.Submit(wp.Job[int]{Ctx: ctx, Fn: func(int) error { return nil }}, 1)
+
+	err := p.Submit(wp.Job[int]{
+		Ctx: ctx,
+		Fn:  func(int) error { return nil },
+	}, 1)
 	if err == nil {
 		t.Fatal("expected error when submitting with canceled context")
 	}
