@@ -12,13 +12,11 @@
 Module: `github.com/azargarov/go-utils/wpool`
 
 ---
-<!-- BENCHMARKS:START -->
-<!-- BENCHMARKS:END -->
 
 ##  Install
 
 ```bash
-go get github.com/azargarov/go-utils/workerpool@v0.2.1
+go get github.com/azargarov/go-utils/wpool@v0.2.1
 ```
 
 ---
