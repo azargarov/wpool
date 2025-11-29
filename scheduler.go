@@ -140,7 +140,6 @@ loop:
 		case req := <-p.submitCh:
 			now := time.Now()
 			q.Push(req.job, req.basePrio, now)
-			p.incSubmitted()
 			p.setQueued(q.Len())
 			if age := q.MaxAge(); age > 0 {
 				p.setMaxAge(age)
