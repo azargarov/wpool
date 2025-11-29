@@ -40,8 +40,7 @@ func (q *fifoQueue[T]) Len() int { return q.size }
 // an error in the future for debugging purposes.
 func (q *fifoQueue[T]) Push(j Job[T], _ float64, _ time.Time) {
 	if q.size == q.capacity {
-		// queue full — drop job (non-blocking model)
-		return
+		q.grow()
 	}
 	q.buf[q.tail] = j
 	q.tail++
@@ -74,4 +73,23 @@ func (q *fifoQueue[T]) Tick(_ time.Time) {}
 // timestamps or waiting durations.
 func (q *fifoQueue[T]) MaxAge() time.Duration {
 	return 0
+}
+
+func (q *fifoQueue[T]) grow() {
+	newCap := q.capacity * 2
+	newBuf := make([]Job[T], newCap)
+
+	if q.size > 0 {
+		if q.head < q.tail {
+			copy(newBuf, q.buf[q.head:q.tail])
+		} else {
+			n := copy(newBuf, q.buf[q.head:])
+			copy(newBuf[n:], q.buf[:q.tail])
+		}
+	}
+
+	q.buf = newBuf
+	q.capacity = newCap
+	q.head = 0
+	q.tail = q.size
 }
