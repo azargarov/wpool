@@ -1,149 +1,152 @@
-# workerpool — Priority, Aging, and Retries for Go Jobs
+# workerpool — High-Performance Queues, Priority, Aging & Retries for Go
 
-**bounded-concurrency** worker pool for Go with:
+A **bounded-concurrency** worker pool for Go with:
 
--  **Priority queue** in front of workers  
--  **Aging** (old jobs bubble up automatically)  
--  **Per-job retries** with context-aware backoff  
--  **Panic-safe workers** and per-job cleanup  
--  **Graceful shutdown** with deadlines  
--  **Metrics** (submitted, executed, active workers, max age)
+- **Multiple schedulers**: FIFO, Priority, Conditional, BucketQueue  
+- **Aging** (old jobs bubble up automatically)  
+- **Per-job retries** with context-aware backoff  
+- **Panic-safe workers** and per-job cleanup  
+- **Graceful shutdown** with deadlines  
+- **High-resolution metrics** (submitted, executed, active workers, max age)  
+- **Ultra-fast bucket-based priority queue** (v0.3.0)
 
 Module: `github.com/azargarov/go-utils/wpool`
 
 ---
 
-##  Install
+## Install
 
 ```bash
-go get github.com/azargarov/go-utils/wpool@v0.2.1
+go get github.com/azargarov/go-utils/wpool@v0.3.0
 ```
 
 ---
 
-##  Quick start
+## Quick start
 
 ```go
 package main
 
 import (
-	"context"
-	"fmt"
-	"time"
+    "context"
+    "fmt"
+    "time"
 
-	wp "github.com/azargarov/go-utils/wpool"
+    wp "github.com/azargarov/go-utils/wpool"
 )
 
 func main() {
-	opts := wp.Options{
-		Workers:    4,
-		AgingRate:  0.3,
-		RebuildDur: 200 * time.Millisecond,
-		QueueSize:  256,
-	}
+    opts := wp.Options{
+        Workers:    4,
+        AgingRate:  0.3,
+        RebuildDur: 200 * time.Millisecond,
+        QueueSize:  256,
+        QT:         wp.Priority,
+    }
 
-	pool := wp.NewPool[int](opts, wp.RetryPolicy{
-		Attempts: 3,
-		Initial:  200 * time.Millisecond,
-		Max:      5 * time.Second,
-	})
-	defer pool.Stop()
+    pool := wp.NewPool[int](opts, wp.RetryPolicy{
+        Attempts: 3,
+        Initial:  200 * time.Millisecond,
+        Max:      5 * time.Second,
+    })
+    defer pool.Stop()
 
-	jobCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+    jobCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+    defer cancel()
 
-	// Submit a job with base priority = 10
-	if err := pool.Submit(wp.Job[int]{
-		Payload: 42,
-		Ctx:     jobCtx,
-		Fn: func(n int) error {
-			fmt.Println("processing", n)
-			return nil
-		},
-	}, 10); err != nil {
-		panic(err)
-	}
+    if err := pool.Submit(wp.Job[int]{
+        Payload: 42,
+        Ctx:     jobCtx,
+        Fn: func(n int) error {
+            fmt.Println("processing", n)
+            return nil
+        },
+    }, 10); err != nil {
+        panic(err)
+    }
 }
 ```
 
 ---
 
+## Queue Types (v0.3.0)
+
+`Options.QT` lets you choose between several scheduling strategies:
+
+| Queue Type     | Behavior | Use Case |
+|----------------|----------|----------|
+| **Fifo**       | First-in–first-out | Best latency, predictable ordering |
+| **Priority**   | Aging + max-heap | Mixed workloads where fairness matters |
+| **BucketQueue**  | Fixed-range buckets with O(1) push/pop | High throughput |
+
+---
+
 ## Priority & Aging
 
-Each job has a **base priority** (`float64`).  
-The scheduler uses a **max-heap** and periodically “ages” queued jobs:
+Each job has a **base priority**.  
+Scheduler computes:
 
 ```
 effective = basePriority + agingRate * ageSeconds
 ```
 
-So high-priority jobs run sooner, but even low-priority jobs eventually rise to the top — no starvation.
-
-```go
-_ = pool.Submit(jobFast, 100) // high priority
-_ = pool.Submit(jobSlow, 1)   // low priority, but will age
-```
+Higher effective priority → runs sooner.  
+Low-priority jobs eventually rise — **no starvation**.
 
 ---
 
-##  Per-job Retry Override
+## BucketQueue (v0.3.0)
 
-You can override the pool’s default retry policy per job:
+Bucket-based priority queue:
+
+- 61 buckets (prio 0–60)
+- Bitmap for bucket occupancy
+- `bits.LeadingZeros64` for instant highest-bucket lookup
+
+---
+
+## Per-job Retry Override
 
 ```go
 _ = pool.Submit(wp.Job[int]{
-	Payload: 1,
-	Ctx:     context.Background(),
-	Retry:   &wp.RetryPolicy{
-		Attempts: 5,
-		Initial:  50 * time.Millisecond,
-		Max:      500 * time.Millisecond,
-	},
-	Fn: func(n int) error {
-		return fmt.Errorf("transient failure")
-	},
+    Payload: 1,
+    Ctx:     context.Background(),
+    Retry: &wp.RetryPolicy{Attempts: 5, Initial: 50 * time.Millisecond},
+    Fn: func(n int) error { return fmt.Errorf("fail") },
 }, 5)
 ```
 
-Retries are **context-aware** — canceling the job’s context stops the backoff instantly.
-
 ---
 
-##  Cancel During Backoff
+## Cancel During Backoff
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 defer cancel()
 
 _ = pool.Submit(wp.Job[int]{
-	Payload: 7,
-	Ctx:     ctx,
-	Fn: func(int) error {
-		// returning an error triggers retry/backoff;
-		// the timeout cancels it early
-		return fmt.Errorf("boom")
-	},
+    Payload: 7,
+    Ctx:     ctx,
+    Fn: func(int) error { return fmt.Errorf("boom") },
 }, 10)
 ```
 
 ---
 
-##  Graceful Shutdown
+## Graceful Shutdown
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
 if err := pool.Shutdown(ctx); err != nil {
-	// context.DeadlineExceeded if not all jobs finished in time
+    // deadline exceeded
 }
 ```
 
-`Stop()` is shorthand for `Shutdown(context.Background())` (waits indefinitely).
-
 ---
 
-##  Metrics
+## Metrics
 
 ```go
 m := pool.Metrics()
@@ -155,73 +158,44 @@ fmt.Println("queue length:", pool.QueueLength())
 
 ---
 
-##  API Overview
+## Benchmark Suite (v0.3.0)
+
+- FIFO / Priority / BucketQueue microbenchmarks  
+- Parallel submit scaling  
+- Multi-priority stress tests  
+- End-to-end latency  
+- Automatic summarization
+
+```bash
+go test -bench Benchmark -benchmem -run ^$
+```
+
+---
+
+## API Overview
 
 ```go
 type Options struct {
-	Workers    int
-	AgingRate  float64
-	RebuildDur time.Duration
-	QueueSize  int
+    Workers    int
+    AgingRate  float64
+    RebuildDur time.Duration
+    QueueSize  int
+    QT         QueueType
 }
-
-type RetryPolicy struct {
-	Attempts int
-	Initial  time.Duration
-	Max      time.Duration
-}
-
-type Job[T any] struct {
-	Payload     T
-	Fn          func(T) error
-	Ctx         context.Context
-	CleanupFunc func()
-	Retry       *RetryPolicy
-}
-
-func NewPool[T any](opts Options, defaultRetry RetryPolicy) *Pool[T]
-func (p *Pool[T]) Submit(job Job[T], basePrio float64) error
-func (p *Pool[T]) Shutdown(ctx context.Context) error
-func (p *Pool[T]) Stop()
-func (p *Pool[T]) Metrics() Metrics
-func (p *Pool[T]) ActiveWorkers() int
-func (p *Pool[T]) QueueLength() int
 ```
 
 ---
 
-##  Design Highlights
+## What’s New in v0.3.0
 
-- **Bounded concurrency** — fixed worker count, controlled queue.  
-- **Scheduler** — priority heap + periodic “aging” of queued jobs.  
-- **Graceful shutdown** — drains queue before exiting.  
-- **Retry & backoff** — configurable per job, context-aware.  
-- **Safe workers** — recover from panics and always run cleanup.  
-- **Metrics** — track submitted/executed jobs and worker states.
-
+- New **BucketQueue** with bitmap O(1) scheduling  
+- Benchmark suite overhaul  
+- Scheduler cleanup + fewer allocations  
+- Improved metrics  
 ---
 
-##  Testing
+## Related Packages
 
-This package is test-friendly:
-- Tiny backoff values speed up unit tests.
-- Includes tests for success, retry, cancel-during-backoff, shutdown deadlines, and panic recovery.
-
-Run:
-```bash
-go test ./...
-```
-
----
-## What's New in v0.2.1
-
-- Unified queue system — choose between **FIFO** and **Priority** scheduling.
-- Priority mode supports **aging** so older jobs bubble up fairly.
-- Clean, documented API with `QueueType` and `Options.FillDefaults()`.
-- Improved metrics: now reports **max job age** and **queue length**.
-
-##  Related Packages
-
-- [`backoff`](../backoff) — Exponential retry and delay generator  
-- [`zlog`](../zlog) — Structured logger (zap-based)  
-- [`grlimit`](../grlimit) — Lightweight concurrency gate  
+- `backoff` — retry helpers  
+- `zlog` — structured logging  
+- `grlimit` — goroutine throttler  
