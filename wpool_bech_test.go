@@ -65,7 +65,7 @@ func runSubmitters(pool *wp.Pool[int], submitters, jobsToRun int) {
 // Submit() + queue push performance.
 func BenchmarkSubmitPath(b *testing.B) {
 	const jobsToRun = 2_000_000
-	submitterCounts := []int{1, 2, 8, 64, 128}
+	submitterCounts := []int{1, 2, 32, 64, 128}
 
 	for _, qt := range benchQueueTypes {
 		for _, submitters := range submitterCounts {
