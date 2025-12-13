@@ -71,7 +71,7 @@ func (p *Pool[T]) runBatch(jobs []Job[T]) {
 }
 
 
-func (p *Pool[T]) processJob__() {
+func (p *Pool[T]) batchProcessJob() {
     var jobs []Job[T]
     var ok bool
     for {
@@ -134,12 +134,7 @@ func (p *Pool[T]) processJob_() {
             }
         }
 
-        // === Still nothing? Check if pool is stopped ===
-        //if p.stopped.Load() {
-        //    return
-        //}
 
-        // === Yield the CPU, but stay alive forever ===
         runtime.Gosched()
 
     nextIteration:

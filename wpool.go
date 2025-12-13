@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,8 @@ const (
 )
 
 type JobFunc[T any] func(T) error
+
+type WakeupWorker chan struct{}
 
 type Job[T any] struct {
 	Payload T
@@ -28,20 +31,53 @@ type Job[T any] struct {
 
 type Pool[T any] struct {
 	stopOnce     sync.Once
-	closed       chan struct{} // signals no more submissions
 	opts         Options
-	stopCh       chan struct{}
+	shutdown	 atomic.Bool
 	doneCh       chan struct{}
 	metricsMu    sync.Mutex
 	metrics      Metrics
-	queue schedQueue[T]
+	queue 		 schedQueue[T]
+
+	idleWorkers  chan WakeupWorker
+
 	sem chan struct{}  
+}
+
+func NewPool[T any](opts Options) *Pool[T]{ 
+	opts.FillDefaults()
+
+
+	p := &Pool[T]{
+		opts:         opts,
+		doneCh:       make(chan struct{}),
+		sem:    make(chan struct{}, opts.Workers*2),
+		idleWorkers: make(chan WakeupWorker, opts.Workers),
+	}
+	p.queue = p.makeQueue()
+	p.metrics.workersActive = make([]atomic.Bool, opts.Workers)
+	
+	var startWorker func(int)
+
+	if opts.PT == SerialPop{
+		startWorker = p.worker
+	}else{
+		startWorker = p.batchWorker
+	}
+
+	for i := 0; i < opts.Workers; i++ {
+		go func(id int) {
+			startWorker(id)
+		}(i)
+		p.SetWorkerState(i, true)
+	}
+
+	return p
 }
 
 func (p *Pool[T]) Shutdown(ctx context.Context) error {
 	p.stopOnce.Do(func() {
-		close(p.stopCh)
-		close(p.closed)
+		p.shutdown.Store(true)
+		close(p.sem)
 	})
 
 	// wait for workers
@@ -68,11 +104,13 @@ func (p *Pool[T]) Submit(job Job[T], basePrio int) error {
 		job.Ctx = context.Background()
 	}
 
+	if p.shutdown.Load(){
+		return fmt.Errorf("workerpool: pool closed")
+	}
+
 	select {
 	case <-job.Ctx.Done():
 		return job.Ctx.Err()
-	case <-p.closed:
-		return fmt.Errorf("workerpool: pool closed")
 	default:
 	}
 
@@ -91,8 +129,6 @@ func (p *Pool[T]) worker(id int) {
 
 	for {
 		select {
-		case <-p.stopCh:
-			return
 
 		case <-p.sem:
 			for {
@@ -112,19 +148,20 @@ func (p *Pool[T]) worker(id int) {
 					_ = j.Fn(j.Payload)
 				}(job)
 			}
+		default:
 		}
 	}
 }
 
 func (p *Pool[T]) batchWorker(id int) {
-	defer p.SetWorkerState(id, false)
-	for {
-		select {
-		case <-p.stopCh:
-			return
-		case <-p.sem:
-			p.processJob__()
-		}
-	}
+    defer p.SetWorkerState(id, false)
+
+    for {
+        _, ok := <-p.sem
+        if !ok { 
+            return
+        }
+        p.batchProcessJob()
+    }
 }
 

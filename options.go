@@ -1,7 +1,6 @@
 package workerpool
 
 import (
-	"sync/atomic"
 	"time"
 )
 
@@ -106,36 +105,4 @@ func (qt QueueType) String() string {
 	default:
 		return "Unknown"
 	}
-}
-
-func NewPool[T any](opts Options) *Pool[T]{ 
-	opts.FillDefaults()
-
-
-	p := &Pool[T]{
-		opts:         opts,
-		stopCh:       make(chan struct{}),
-		doneCh:       make(chan struct{}),
-		closed:       make(chan struct{}),
-		sem:    make(chan struct{}, opts.Workers*2),
-	}
-	p.queue = p.makeQueue()
-	p.metrics.workersActive = make([]atomic.Bool, opts.Workers)
-	
-	var startWorker func(int)
-
-	if opts.PT == SerialPop{
-		startWorker = p.worker
-	}else{
-		startWorker = p.batchWorker
-	}
-
-	for i := 0; i < opts.Workers; i++ {
-		go func(id int) {
-			startWorker(id)
-		}(i)
-		p.SetWorkerState(i, true)
-	}
-
-	return p
 }
