@@ -22,7 +22,7 @@ type fifoQueue[T any] struct {
 // newFifoQueue creates a FIFO queue with the given capacity.
 // The capacity determines how many jobs can be queued before
 // Push starts dropping new submissions.
-func newFifoQueue[T any](cap int) *fifoQueue[T] {
+func NewFifoQueue[T any](cap int) *fifoQueue[T] {
 	return &fifoQueue[T]{
 		buf:      make([]Job[T], cap),
 		capacity: cap,
@@ -38,7 +38,7 @@ func (q *fifoQueue[T]) Len() int { return q.size }
 // are ignored. If the queue is full, the job is silently dropped
 // (consistent with existing behavior). You may choose to return
 // an error in the future for debugging purposes.
-func (q *fifoQueue[T]) Push(j Job[T], _ float64, _ time.Time) {
+func (q *fifoQueue[T]) Push(j Job[T], _ int, _ time.Time) bool {
 	if q.size == q.capacity {
 		q.grow()
 	}
@@ -48,6 +48,8 @@ func (q *fifoQueue[T]) Push(j Job[T], _ float64, _ time.Time) {
 		q.tail = 0
 	}
 	q.size++
+
+	return true
 }
 
 // Pop removes and returns the oldest job.
@@ -93,3 +95,9 @@ func (q *fifoQueue[T]) grow() {
 	q.head = 0
 	q.tail = q.size
 }
+
+func (q *fifoQueue[T]) BatchPop() ([]Job[T], bool){ return nil, false }
+
+func (q *fifoQueue[T]) Size() int{ return q.size }
+
+func (q *fifoQueue[T]) Capacity() int{ return q.capacity }

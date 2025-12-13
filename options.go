@@ -12,15 +12,12 @@ import (
 // Options.QueueType when creating a new Pool.
 type QueueType int
 
+type PopType int
+
 const (
 	// Fifo represents a simple first-in–first-out queue.
 	// Jobs are executed strictly in the order they are submitted.
 	Fifo QueueType = iota
-
-	// Priority represents a priority queue that orders jobs
-	// by their effective priority, which increases over time
-	// according to the configured aging rate.
-	Priority
 
 	// Conditional is a placeholder for future scheduling strategies
 	// where dispatching logic may depend on job state or custom
@@ -36,6 +33,14 @@ const (
 	// This scheduler offers extremely fast push/pop, predictable behavior,
 	// and static aging without periodic rebalancing.
 	BucketQueue
+
+	ShardedQueue
+)
+
+const (
+	SerialPop PopType = iota
+
+	BatchPop 
 )
 
 // Options configure a worker Pool.
@@ -47,7 +52,7 @@ type Options struct {
 
 	// AgingRate controls how fast queued jobs grow in effective priority.
 	// Higher values mean old jobs will be pulled to the top sooner.
-	AgingRate float64
+	AgingRate int
 
 	// RebuildDur is how often the scheduler re-computes effective priorities
 	// for all queued jobs.
@@ -63,91 +68,74 @@ type Options struct {
 	// Priority to enable aging-based priority scheduling,
 	// or Conditional for custom or experimental logic.
 	QT QueueType
+
+	PT PopType
 }
 
-// FillDefaults populates missing or zero-valued fields in Options
-// with sensible defaults.
-//
-// This method is automatically called by NewPool before creating
-// the worker pool. It ensures that all parameters have valid values
-// even if the caller provides only partial configuration.
-//
-// Default values:
-//   - Workers:     4
-//   - AgingRate:   0.3
-//   - RebuildDur:  200ms
-//   - QueueSize:   256
-//   - QT:          Fifo
 func (o *Options) FillDefaults() {
 	if o.Workers <= 0 {
 		o.Workers = 4
 	}
 	if o.AgingRate <= 0 {
-		o.AgingRate = 0.3
+		o.AgingRate = 3
 	}
-	if o.RebuildDur <= 0 {
-		o.RebuildDur = 200 * time.Millisecond
-	}
+	//if o.RebuildDur <= 0 {
+	//	o.RebuildDur = 200 * time.Millisecond
+	//}
 	if o.QueueSize <= 0 {
 		o.QueueSize = 256
 	}
 	if o.QT == 0 {
 		o.QT = Fifo
 	}
+	if o.PT > BatchPop{
+		o.PT = SerialPop
+	}
 }
 
-// String returns a human-readable name for the queue type.
-// It is used in logs, metrics, and test output. Unknown values
-// return "Unknown".
 func (qt QueueType) String() string {
 	switch qt {
 	case Fifo:
 		return "Fifo"
-	case Priority:
-		return "Priority"
 	case Conditional:
 		return "Conditional"
 	case BucketQueue:
-		return "BucketQueue"
+		return "BucketQueue"	
+	case ShardedQueue:
+		return "ShardedQueue"
 	default:
 		return "Unknown"
 	}
 }
 
-// NewPool creates and starts a new Pool with the given options and a default
-// retry policy. Zero values in defaultRetry are filled with built-in defaults.
-func NewPool[T any](opts Options, defaultRetry RetryPolicy) *Pool[T] {
+func NewPool[T any](opts Options) *Pool[T]{ 
 	opts.FillDefaults()
 
-	if defaultRetry.Attempts <= 0 {
-		defaultRetry.Attempts = defaultAttempts
-	}
-	if defaultRetry.Initial <= 0 {
-		defaultRetry.Initial = defaultInitialRetry
-	}
-	if defaultRetry.Max <= 0 {
-		defaultRetry.Max = defauiltMaxRetry
-	}
 
 	p := &Pool[T]{
 		opts:         opts,
-		submitCh:     make(chan submitReq[T], opts.QueueSize),
-		workCh:       make(chan Job[T]),
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 		closed:       make(chan struct{}),
-		defaultRetry: defaultRetry,
+		sem:    make(chan struct{}, opts.Workers*2),
 	}
+	p.queue = p.makeQueue()
 	p.metrics.workersActive = make([]atomic.Bool, opts.Workers)
+	
+	var startWorker func(int)
+
+	if opts.PT == SerialPop{
+		startWorker = p.worker
+	}else{
+		startWorker = p.batchWorker
+	}
 
 	for i := 0; i < opts.Workers; i++ {
 		go func(id int) {
-			p.worker(id)
+			startWorker(id)
 		}(i)
 		p.SetWorkerState(i, true)
 	}
-
-	go p.scheduler()
 
 	return p
 }

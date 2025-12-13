@@ -1,31 +1,32 @@
-package workerpool
+package workerpool_test
 
 import (
 	"testing"
 	"time"
+	wp "github.com/azargarov/wpool"
 )
 
 func TestFifoGrow_NoWrap(t *testing.T) {
 	capacity := 4
 	newSize := 5
-	q := newFifoQueue[int](capacity)
+	q := wp.NewFifoQueue[int](capacity)
 
 	for i := 1; i <= capacity; i++ {
-		q.Push(Job[int]{Payload: i}, 0, time.Now())
+		q.Push(wp.Job[int]{Payload: i}, 0, time.Now())
 	}
 
-	if q.size != capacity {
-		t.Fatalf("expected size=4, got %d", q.size)
+	if q.Size() != capacity {
+		t.Fatalf("expected size=4, got %d", q.Size())
 	}
 
-	q.Push(Job[int]{Payload: 5}, 0, time.Now())
+	q.Push(wp.Job[int]{Payload: 5}, 0, time.Now())
 
-	if q.capacity <= capacity {
-		t.Fatalf("grow() didn't increase capacity, got %d", q.capacity)
+	if q.Capacity() <= capacity {
+		t.Fatalf("grow() didn't increase capacity, got %d", q.Capacity())
 	}
 
-	if q.size != newSize {
-		t.Fatalf("after grow: expected size=%d, got %d", newSize, q.size)
+	if q.Size() != newSize {
+		t.Fatalf("after grow: expected size=%d, got %d", newSize, q.Size())
 	}
 
 	for expected := 1; expected <= newSize; expected++ {
@@ -41,35 +42,28 @@ func TestFifoGrow_NoWrap(t *testing.T) {
 
 func TestFifoGrow_WithWrap(t *testing.T) {
 	capacity := 4
-	q := newFifoQueue[int](capacity)
+	q := wp.NewFifoQueue[int](capacity)
 
-	q.Push(Job[int]{Payload: 1}, 0, time.Now())
-	q.Push(Job[int]{Payload: 2}, 0, time.Now())
-	q.Push(Job[int]{Payload: 3}, 0, time.Now())
+	q.Push(wp.Job[int]{Payload: 1}, 0, time.Now())
+	q.Push(wp.Job[int]{Payload: 2}, 0, time.Now())
+	q.Push(wp.Job[int]{Payload: 3}, 0, time.Now())
 
-	// Делаем wrap-around: Pop → head=1
 	j, _ := q.Pop(time.Now())
 	if j.Payload != 1 {
 		t.Fatalf("expected to pop 1, got %d", j.Payload)
 	}
 
-	//  head=1 tail=3
-	q.Push(Job[int]{Payload: 4}, 0, time.Now())
-	q.Push(Job[int]{Payload: 5}, 0, time.Now())
+	q.Push(wp.Job[int]{Payload: 4}, 0, time.Now())
+	q.Push(wp.Job[int]{Payload: 5}, 0, time.Now())
 
-	// queue state:
-	// [5,2,3,4]
-	// head=1 tail=1 size=4 (full, wrap-around)
+	q.Push(wp.Job[int]{Payload: 6}, 0, time.Now())
 
-	// Следующий push вызывает grow()
-	q.Push(Job[int]{Payload: 6}, 0, time.Now())
-
-	if q.capacity <= capacity {
+	if q.Capacity() <= capacity {
 		t.Fatalf("grow() didn't increase capacity")
 	}
 
-	if q.size != capacity+1 {
-		t.Fatalf("expected size=%d after grow, got %d", capacity+1, q.size)
+	if q.Size() != capacity+1 {
+		t.Fatalf("expected size=%d after grow, got %d", capacity+1, q.Size())
 	}
 
 	expected := []int{2, 3, 4, 5, 6}
@@ -87,13 +81,13 @@ func TestFifoGrow_WithWrap(t *testing.T) {
 func TestFifoGrow_MultipleGrows(t *testing.T) {
 	capacity := 4
 	size := 50
-	q := newFifoQueue[int](capacity)
+	q := wp.NewFifoQueue[int](capacity)
 	for i := 1; i <= size; i++ {
-		q.Push(Job[int]{Payload: i}, 0, time.Now())
+		q.Push(wp.Job[int]{Payload: i}, 0, time.Now())
 	}
 
-	if q.size != size {
-		t.Fatalf("expected size %d, got %d", size, q.size)
+	if q.Size() != size {
+		t.Fatalf("expected size %d, got %d", size, q.Size())
 	}
 
 	for i := 1; i <= size; i++ {

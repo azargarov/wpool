@@ -19,7 +19,7 @@ type item[T any] struct {
 	job Job[T]
 
 	// basePrio is the user-provided priority value supplied at Submit time.
-	basePrio float64
+	basePrio int
 
 	// queuedAt records when the job entered the scheduler.
 	// Used for aging in the priority (heap) scheduler.
@@ -27,11 +27,11 @@ type item[T any] struct {
 
 	// eff is the effective priority computed from basePrio and job age.
 	// It is used only by the heap-based priority queue.
-	eff float64
+	//eff int
 
 	// index is maintained by the heap-based queue. It stores the element’s
 	// current position in the heap and is required by the heap.Interface.
-	index int
+	//index int
 
 	// prio is the discrete bucket index used by the bucket-based queue.
 	prio Prio
@@ -39,11 +39,11 @@ type item[T any] struct {
 
 // submitReq is what the pool feeds into the scheduler.
 // We separate it from item so we can attach timestamps inside the scheduler.
-type submitReq[T any] struct {
-	job      Job[T]
-	basePrio float64
-	//respCh    chan error // TODO: future blocking submit
-}
+//type submitReq[T any] struct {
+//	job      Job[T]
+//	basePrio int
+//	//respCh    chan error // TODO: future blocking submit
+//}
 
 // schedQueue defines the common behavior of all internal scheduler queues.
 //
@@ -59,13 +59,15 @@ type schedQueue[T any] interface {
 	//
 	// basePrio is the user-provided priority value, and now is the
 	// enqueue timestamp. FIFO implementations can ignore both.
-	Push(job Job[T], basePrio float64, now time.Time)
+	Push(job Job[T], basePrio int, now time.Time) bool
 
 	// Pop retrieves and removes the next job to dispatch.
 	//
 	// It returns the selected job and a boolean flag indicating
 	// whether a job was available. If false, the queue is empty.
 	Pop(now time.Time) (Job[T], bool)
+
+	BatchPop() ([]Job[T], bool)
 
 	// Tick updates internal state periodically.
 	//
@@ -90,79 +92,18 @@ type schedQueue[T any] interface {
 func (p *Pool[T]) makeQueue() schedQueue[T] {
 	switch p.opts.QT {
 	case Fifo:
-		return newFifoQueue[T](initialFifoCapacity)
-	case Priority:
-		return newPrioQueue[T](p.opts.AgingRate)
+		return NewFifoQueue[T](initialFifoCapacity)
 	case Conditional:
 		// for now fall back to FIFO
-		return newFifoQueue[T](initialFifoCapacity)
+		return NewFifoQueue[T](initialFifoCapacity)
 	case BucketQueue:
-		return newBucketQueue[T](p.opts.AgingRate, initialBucketSize)
+		return NewBucketQueue[T](p.opts.AgingRate, initialBucketSize)	
+	case ShardedQueue:
+		return newShardedBucketQueue[T](defaultShardNum,p.opts.AgingRate, initialBucketSize)
 
 	default:
-		return newFifoQueue[T](initialFifoCapacity)
+		return NewFifoQueue[T](initialFifoCapacity)
 
 	}
 }
 
-// scheduler is a dedicated goroutine that:
-//   - keeps jobs in a max-heap ordered by effective priority
-//   - periodically re-ages jobs so old ones bubble up
-//   - dispatches ready jobs to workers
-//   - drains the queue on shutdown
-func (p *Pool[T]) scheduler() {
-	q := p.makeQueue()
-
-	ticker := time.NewTicker(p.opts.RebuildDur)
-	defer ticker.Stop()
-
-loop:
-	for {
-		if job, ok := q.Pop(time.Now()); ok {
-			p.setQueued(q.Len())
-			p.dispatch(job)
-			continue
-		}
-
-		select {
-		case <-p.stopCh:
-			// drain queue
-			for {
-				job, ok := q.Pop(time.Now())
-				if !ok {
-					break
-				}
-				p.dispatch(job)
-			}
-			close(p.workCh)
-			break loop
-
-		case req := <-p.submitCh:
-			now := time.Now()
-			q.Push(req.job, req.basePrio, now)
-			p.setQueued(q.Len())
-			if age := q.MaxAge(); age > 0 {
-				p.setMaxAge(age)
-			}
-		case <-ticker.C:
-			now := time.Now()
-			q.Tick(now)
-			p.setQueued(q.Len())
-			if age := q.MaxAge(); age > 0 {
-				p.setMaxAge(age)
-			}
-		}
-	}
-
-	close(p.doneCh)
-}
-
-// dispatch sends a job to workers. If all workers are busy, we block until one is free.
-func (p *Pool[T]) dispatch(job Job[T]) {
-	select {
-	case p.workCh <- job:
-	default:
-		// if all workes are buissy - wait
-		p.workCh <- job
-	}
-}

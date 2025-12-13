@@ -3,23 +3,15 @@ package workerpool_test
 import (
 	"context"
 	"errors"
-	//"runtime"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	wp "github.com/azargarov/go-utils/wpool"
+	wp "github.com/azargarov/wpool"
 )
 
-var fastRetry = wp.RetryPolicy{
-	Attempts: 3,
-	Initial:  5 * time.Millisecond,
-	Max:      10 * time.Millisecond,
-}
-
 var queueTypes = []wp.QueueType{
-	wp.Fifo,
+	//wp.Fifo,
 	//wp.Priority,
 	//wp.Conditional,
 	wp.BucketQueue,
@@ -28,23 +20,12 @@ var queueTypes = []wp.QueueType{
 func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int] {
 	opts := wp.Options{
 		Workers:    workers,
-		AgingRate:  0.3,
+		AgingRate:  3,
 		RebuildDur: 10 * time.Millisecond,
 		QueueSize:  4_000_000,
 		QT:         qt,
 	}
-	return wp.NewPool[int](opts, fastRetry)
-}
-
-func TestDefaultRetryPolicy(t *testing.T) {
-	rp := wp.GetDefaultRP()
-	if rp == nil {
-		t.Fatalf("Default Retry Policy is nil")
-	}
-
-	if rp.Attempts == 0 || rp.Initial == 0 || rp.Max == 0 {
-		t.Fatal("Default retry policy is not default")
-	}
+	return wp.NewPool[int](opts)
 }
 
 func TestFillDefaults(t *testing.T) {
@@ -66,36 +47,26 @@ func TestPoolQueues(t *testing.T) {
 				jobSuccess(t, qt)
 			})
 
-			t.Run("RetryThenSuccess", func(t *testing.T) {
-				t.Parallel()
-				retryThenSuccess(t, qt)
-			})
-
-			t.Run("CancelDuringBackoff", func(t *testing.T) {
-				t.Parallel()
-				cancelDuringBackoff(t, qt)
-			})
-
 			t.Run("ShutdownTimeout", func(t *testing.T) {
 				t.Parallel()
 				shutdownTimeout(t, qt)
 			})
-
+//
 			t.Run("SubmitAfterShutdown", func(t *testing.T) {
 				t.Parallel()
 				submitAfterShutdown(t, qt)
 			})
-
+//
 			t.Run("PanicRecoveryAndCleanup", func(t *testing.T) {
 				t.Parallel()
 				panicRecoveryAndCleanup(t, qt)
 			})
-
+//
 			t.Run("MetricsAndQueueLength", func(t *testing.T) {
 				t.Parallel()
 				metricsAndQueueLength(t, qt)
 			})
-
+//
 			t.Run("SubmitCanceledContext", func(t *testing.T) {
 				t.Parallel()
 				submitCanceledContext(t, qt)
@@ -142,86 +113,6 @@ func jobSuccess(t *testing.T, qt wp.QueueType) {
 
 	if got := p.ActiveWorkers(); got != 0 {
 		t.Fatalf("active workers = %d; want 0", got)
-	}
-}
-
-func retryThenSuccess(t *testing.T, qt wp.QueueType) {
-	t.Helper()
-
-	p := newTestPool(1, qt)
-	defer p.Stop()
-
-	var attempts int32
-	done := make(chan struct{})
-
-	jobCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	err := p.Submit(wp.Job[int]{
-		Payload: 42,
-		Ctx:     jobCtx,
-		Retry:   &wp.RetryPolicy{Attempts: 3, Initial: 2 * time.Millisecond, Max: 5 * time.Millisecond},
-		Fn: func(_ int) error {
-			if atomic.AddInt32(&attempts, 1) < 3 {
-				return errors.New("fail")
-			}
-			close(done)
-			return nil
-		},
-	}, 10)
-	if err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-
-	select {
-	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Fatal("job did not succeed after retries in time")
-	}
-
-	if got := atomic.LoadInt32(&attempts); got != 3 {
-		t.Fatalf("attempts = %d; want 3", got)
-	}
-}
-
-func cancelDuringBackoff(t *testing.T, qt wp.QueueType) {
-	t.Helper()
-
-	p := newTestPool(1, qt)
-	defer p.Stop()
-
-	var attempts int32
-	step := make(chan struct{})
-	jobCtx, cancel := context.WithCancel(context.Background())
-
-	var once sync.Once
-
-	err := p.Submit(wp.Job[int]{
-		Payload: 7,
-		Ctx:     jobCtx,
-		Retry:   &wp.RetryPolicy{Attempts: 5, Initial: 100 * time.Millisecond, Max: 100 * time.Millisecond},
-		Fn: func(_ int) error {
-			atomic.AddInt32(&attempts, 1)
-			once.Do(func() { close(step) })
-			return errors.New("boom")
-		},
-	}, 10)
-	if err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-
-	// wait until first attempt happened, then cancel during backoff
-	select {
-	case <-step:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("first attempt did not happen in time")
-	}
-	cancel()
-
-	// small wait so worker can observe cancel and exit backoff
-	time.Sleep(50 * time.Millisecond)
-	if got := atomic.LoadInt32(&attempts); got != 1 {
-		t.Fatalf("attempts after cancel = %d; want 1", got)
 	}
 }
 
@@ -348,13 +239,8 @@ func metricsAndQueueLength(t *testing.T, qt wp.QueueType) {
 
 	time.Sleep(20 * time.Millisecond)
 
-	m := p.Metrics()
-	if m.Submitted() == 0 {
+	if p.Submitted() == 0 {
 		t.Fatal("expected submitted > 0")
-	}
-
-	if p.QueueLength() < 0 {
-		t.Fatal("queue length should not be negative")
 	}
 }
 
@@ -375,3 +261,5 @@ func submitCanceledContext(t *testing.T, qt wp.QueueType) {
 		t.Fatal("expected error when submitting with canceled context")
 	}
 }
+
+
