@@ -11,14 +11,16 @@ func (p *Pool[T]) runBatch(jobs []Job[T]) {
 func (p *Pool[T])runJob(j Job[T]){
     defer func() {
         if r := recover(); r != nil {
-            //  panic handler
+            //  TODO:  panic handler
         }
         if j.CleanupFunc != nil {
             j.CleanupFunc()
         }
         p.metrics.executed.Add(1)
     }()
+    // TODO: do not drop error
     _ = j.Fn(j.Payload)
+    p.incExecuted()
 }
 
 func (p *Pool[T]) batchProcessJob() int64 {
