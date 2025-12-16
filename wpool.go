@@ -4,7 +4,9 @@ package workerpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +14,8 @@ import (
 
 const (
 	DefaultMaxWorkers   = 10
+	defaultBatch		= 512
+	batchTimerInterval  = 50*time.Microsecond
 )
 
 type JobFunc[T any] func(T) error
@@ -37,39 +41,44 @@ type Pool[T any] struct {
 	metricsMu    sync.Mutex
 	metrics      Metrics
 	queue 		 schedQueue[T]
-
+	wakes 		 []WakeupWorker
 	idleWorkers  chan WakeupWorker
 
-	sem chan struct{}  
+	pendingJobs   atomic.Int64  // scheduling counter, not metrics
+	batchInFlight atomic.Bool   // only one wake trigger at a time
+	lastDrainNano atomic.Int64  // for timer (optional but recommended)
+
+}
+
+func (p * Pool[T])GetIdleLen()int64{
+	return int64(len(p.idleWorkers))
 }
 
 func NewPool[T any](opts Options) *Pool[T]{ 
 	opts.FillDefaults()
 
-
 	p := &Pool[T]{
 		opts:         opts,
 		doneCh:       make(chan struct{}),
-		sem:    make(chan struct{}, opts.Workers*2),
 		idleWorkers: make(chan WakeupWorker, opts.Workers),
 	}
 	p.queue = p.makeQueue()
 	p.metrics.workersActive = make([]atomic.Bool, opts.Workers)
 	
-	var startWorker func(int)
-
-	if opts.PT == SerialPop{
-		startWorker = p.worker
-	}else{
-		startWorker = p.batchWorker
+	p.wakes = make([]WakeupWorker, opts.Workers)
+	for i := 0; i < opts.Workers; i++ {
+	    p.wakes[i] = make(WakeupWorker,1)
 	}
 
 	for i := 0; i < opts.Workers; i++ {
 		go func(id int) {
-			startWorker(id)
+			p.batchWorker(id)
 		}(i)
 		p.SetWorkerState(i, true)
 	}
+
+	p.lastDrainNano.Store(time.Now().UnixNano())
+	go p.batchTimer()
 
 	return p
 }
@@ -77,23 +86,25 @@ func NewPool[T any](opts Options) *Pool[T]{
 func (p *Pool[T]) Shutdown(ctx context.Context) error {
 	p.stopOnce.Do(func() {
 		p.shutdown.Store(true)
-		close(p.sem)
+		close(p.doneCh)
+
+    	for _, w := range p.wakes {
+    	    if w != nil {
+    	        close(w)
+    	    }
+    	}
 	})
 
-	// wait for workers
-	doneWorkers := make(chan struct{})
-	go func() {
-		for p.ActiveWorkers() != 0 {
-			time.Sleep(0)
+	for {
+		if p.ActiveWorkers() == 0 {
+			return nil
 		}
-		close(doneWorkers)
-	}()
-
-	select {
-	case <-doneWorkers:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			runtime.Gosched()
+		}
 	}
 }
 
@@ -114,54 +125,92 @@ func (p *Pool[T]) Submit(job Job[T], basePrio int) error {
 	default:
 	}
 
-	p.queue.Push(job, basePrio, time.Now())
+	ok := p.queue.Push(job, basePrio, time.Now())
+	if ! ok {
+		return errors.New("queue is full")
+	}
 
-	p.sem <- struct{}{}
-	
-	p.metrics.submitted.Add(1)
-	p.incSubmitted()
 	p.incQueued()
+	p.metrics.submitted.Add(1)
+	//p.incSubmitted()
+
+	pj := p.pendingJobs.Add(1)
+	
+	if pj < defaultBatch {
+	    return nil
+	}
+
+	if p.batchInFlight.CompareAndSwap(false, true) {
+	    select {
+	    case w := <-p.idleWorkers:
+	        w <- struct{}{}
+	        p.lastDrainNano.Store(time.Now().UnixNano()) // 👈 reset signal
+	    default:
+	        p.batchInFlight.Store(false)
+	    }
+	}
 	return nil
 }
 
-func (p *Pool[T]) worker(id int) {
+
+func (p *Pool[T]) batchWorker(id int) {
 	defer p.SetWorkerState(id, false)
 
+	wake := p.wakes[id]
+	p.idleWorkers <- wake
+
 	for {
-		select {
-
-		case <-p.sem:
-			for {
-				job, ok := p.queue.Pop(time.Now())
-				if !ok {break}
-
-				func(j Job[T]) {
-					defer func() {
-						if r := recover(); r != nil {
-							// TODO: log panic r
-						}
-						if j.CleanupFunc != nil {
-							j.CleanupFunc()
-						}
-						p.metrics.executed.Add(1)
-					}()
-					_ = j.Fn(j.Payload)
-				}(job)
-			}
-		default:
+		_, ok := <-wake
+		if !ok || p.shutdown.Load() {
+			return
 		}
+
+		deQueued := p.batchProcessJob()
+        p.batchDecQueued(deQueued)
+		new := p.pendingJobs.Add(-int64(deQueued))
+		if new < 0 {
+		    p.pendingJobs.Store(0)
+		}
+		p.batchInFlight.Store(false)
+		p.lastDrainNano.Store(time.Now().UnixNano())
+
+		if p.shutdown.Load() {
+		    return
+		}
+		p.idleWorkers <- wake
+
 	}
 }
 
-func (p *Pool[T]) batchWorker(id int) {
-    defer p.SetWorkerState(id, false)
+
+
+func (p *Pool[T]) batchTimer() {
+    t := time.NewTicker(batchTimerInterval) 
+    defer t.Stop()
 
     for {
-        _, ok := <-p.sem
-        if !ok { 
+        select {
+        case <-t.C:
+            if p.shutdown.Load() {
+                return
+            }
+            if p.pendingJobs.Load() == 0 {
+                continue
+            }
+            if time.Since(time.Unix(0, p.lastDrainNano.Load())) < batchTimerInterval {
+                continue
+            }
+            if p.batchInFlight.CompareAndSwap(false, true) {
+                select {
+                case w := <-p.idleWorkers:
+                    w <- struct{}{}
+                default:
+                    p.batchInFlight.Store(false)
+                }
+            }
+        case <-p.doneCh:
             return
         }
-        p.batchProcessJob()
     }
 }
 

@@ -68,7 +68,6 @@ type Options struct {
 	// or Conditional for custom or experimental logic.
 	QT QueueType
 
-	PT PopType
 }
 
 func (o *Options) FillDefaults() {
@@ -87,9 +86,7 @@ func (o *Options) FillDefaults() {
 	if o.QT == 0 {
 		o.QT = Fifo
 	}
-	if o.PT > BatchPop{
-		o.PT = SerialPop
-	}
+
 }
 
 func (qt QueueType) String() string {

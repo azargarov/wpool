@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	maxBatch = 256
+	maxBatch = defaultBatch
 	BQminPriority = 0
 	BQmaxPriority = 60
 	initialBucketSize = 4192
@@ -213,6 +213,7 @@ func (q *bucketQueue[T]) BatchPop() ([]Job[T], bool) {
 		}
 
 		mask := b.mask
+
 		for i := uint64(0); i < used; i++ {
 			pos := int((head + i) & mask)
 			q.batch[i] = b.buf[pos].job

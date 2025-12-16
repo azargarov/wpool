@@ -1,5 +1,7 @@
 package workerpool
 
+//go:inline
+
 import (
 	"time"
 )
@@ -97,7 +99,7 @@ func (p *Pool[T]) makeQueue() schedQueue[T] {
 		// for now fall back to FIFO
 		return NewFifoQueue[T](initialFifoCapacity)
 	case BucketQueue:
-		return NewBucketQueue[T](p.opts.AgingRate, initialBucketSize)	
+		return NewBucketQueue[T](p.opts.AgingRate, p.opts.QueueSize)	
 	case ShardedQueue:
 		return newShardedBucketQueue[T](defaultShardNum,p.opts.AgingRate, initialBucketSize)
 
