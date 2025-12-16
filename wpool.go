@@ -209,3 +209,8 @@ func (p *Pool[T]) batchTimer() {
     }
 }
 
+// SetWorkerState marks worker id as active/inactive. It is called internally
+// by the pool when workers start or stop.
+func (p *Pool[T]) SetWorkerState(id int, state bool) {
+	p.metrics.workersActive[id].Store(state)
+}

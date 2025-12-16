@@ -31,11 +31,7 @@ func (p *Pool[T]) incExecuted() uint64  {
 	return p.metrics.executed.Add(1) 
 }
 
-// SetWorkerState marks worker id as active/inactive. It is called internally
-// by the pool when workers start or stop.
-func (p *Pool[T]) SetWorkerState(id int, state bool) {
-	p.metrics.workersActive[id].Store(state)
-}
+
 
 // ActiveWorkers counts how many workers are currently marked active.
 func (p *Pool[T]) ActiveWorkers() int {
