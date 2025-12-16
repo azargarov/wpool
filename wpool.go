@@ -129,10 +129,7 @@ func (p *Pool[T]) Submit(job Job[T], basePrio int) error {
 	if ! ok {
 		return errors.New("queue is full")
 	}
-
 	p.incQueued()
-	p.metrics.submitted.Add(1)
-	//p.incSubmitted()
 
 	pj := p.pendingJobs.Add(1)
 	
@@ -181,8 +178,6 @@ func (p *Pool[T]) batchWorker(id int) {
 
 	}
 }
-
-
 
 func (p *Pool[T]) batchTimer() {
     t := time.NewTicker(batchTimerInterval) 

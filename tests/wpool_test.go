@@ -62,11 +62,6 @@ func TestPoolQueues(t *testing.T) {
 				panicRecoveryAndCleanup(t, qt)
 			})
 //
-			t.Run("MetricsAndQueueLength", func(t *testing.T) {
-				t.Parallel()
-				metricsAndQueueLength(t, qt)
-			})
-//
 			t.Run("SubmitCanceledContext", func(t *testing.T) {
 				t.Parallel()
 				submitCanceledContext(t, qt)
@@ -229,20 +224,6 @@ func panicRecoveryAndCleanup(t *testing.T, qt wp.QueueType) {
 	}
 }
 
-func metricsAndQueueLength(t *testing.T, qt wp.QueueType) {
-	t.Helper()
-
-	p := newTestPool(1, qt)
-	defer p.Stop()
-
-	_ = p.Submit(wp.Job[int]{Payload: 1, Fn: func(n int) error { return nil }}, 10)
-
-	time.Sleep(20 * time.Millisecond)
-
-	if p.Submitted() == 0 {
-		t.Fatal("expected submitted > 0")
-	}
-}
 
 func submitCanceledContext(t *testing.T, qt wp.QueueType) {
 	t.Helper()

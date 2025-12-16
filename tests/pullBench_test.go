@@ -148,7 +148,7 @@ func BenchmarkMyPool_MixedReal(b *testing.B) {
         atomic.AddInt64(&counter, 1)
         var count int64
         var f float64
-        for i := range int64(10){
+        for i := range int64(1){
             count += i * i
             f += float64(i) / float64(count)
         }

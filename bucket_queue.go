@@ -106,7 +106,7 @@ func (q *bucketQueue[T]) MaxAge() time.Duration {
 }
 func (q *bucketQueue[T]) Push(job Job[T], basePrio int, now time.Time) bool {
 	seq := q.seq.Add(1)
-	idx := int(ComputeBucket(basePrio, q.aging, seq)) // 0..BQmaxPriority
+	idx := int(ComputeBucket(basePrio, q.aging, seq)) 
 
 	b := &q.buckets[idx]
 	b.mu.Lock()
