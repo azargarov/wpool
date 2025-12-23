@@ -1,14 +1,14 @@
 package workerpool
 
-//go:inline
 
-func (p *Pool[T]) runBatch(jobs []Job[T]) {
+
+func (p *Pool[T,M]) runBatch(jobs []Job[T]) {
     for _, j := range jobs {
         p.runJob(j)
     }
 }
 
-func (p *Pool[T])runJob(j Job[T]){
+func (p *Pool[T, M])runJob(j Job[T]){
     defer func() {
         if r := recover(); r != nil {
             //  TODO:  panic handler
@@ -16,14 +16,14 @@ func (p *Pool[T])runJob(j Job[T]){
         if j.CleanupFunc != nil {
             j.CleanupFunc()
         }
-        p.metrics.executed.Add(1)
+        p.metrics.IncExecuted()
     }()
     // TODO: do not drop error
     _ = j.Fn(j.Payload)
-    p.incExecuted()
+    p.metrics.IncExecuted()
 }
 
-func (p *Pool[T]) batchProcessJob() int64 {
+func (p *Pool[T, M]) batchProcessJob() int64 {
     var jobs []Job[T]
     var ok bool
     var counter int64
