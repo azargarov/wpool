@@ -24,25 +24,22 @@ type WakeupWorker chan struct{}
 
 type Job[T any] struct {
 	Payload T
-
 	Fn JobFunc[T]
-
 	Ctx context.Context
-
 	CleanupFunc func()
-
 }
 
-type Pool[T any] struct {
+type Pool[T any, M MetricsPolicy] struct {
 	stopOnce     sync.Once
 	opts         Options
 	shutdown	 atomic.Bool
 	doneCh       chan struct{}
 	metricsMu    sync.Mutex
-	metrics      Metrics
+	metrics      M
 	queue 		 schedQueue[T]
 	wakes 		 []WakeupWorker
 	idleWorkers  chan WakeupWorker
+	workersActive []atomic.Bool
 
 	pendingJobs   atomic.Int64  // scheduling counter, not metrics
 	batchInFlight atomic.Bool   // only one wake trigger at a time
@@ -50,21 +47,21 @@ type Pool[T any] struct {
 
 }
 
-func (p * Pool[T])GetIdleLen()int64{
+func (p * Pool[T, M])GetIdleLen()int64{
 	return int64(len(p.idleWorkers))
 }
 
-func NewPool[T any](opts Options) *Pool[T]{ 
+func NewPool[T any, M MetricsPolicy](opts Options, metrics M) *Pool[T, M]{ 
 	opts.FillDefaults()
 
-	p := &Pool[T]{
+	p := &Pool[T, M]{
 		opts:         opts,
 		doneCh:       make(chan struct{}),
 		idleWorkers: make(chan WakeupWorker, opts.Workers),
+		workersActive: make([]atomic.Bool, opts.Workers),
 	}
 	p.queue = p.makeQueue()
-	p.metrics.workersActive = make([]atomic.Bool, opts.Workers)
-	
+	p.metrics = metrics
 	p.wakes = make([]WakeupWorker, opts.Workers)
 	for i := 0; i < opts.Workers; i++ {
 	    p.wakes[i] = make(WakeupWorker,1)
@@ -83,7 +80,7 @@ func NewPool[T any](opts Options) *Pool[T]{
 	return p
 }
 
-func (p *Pool[T]) Shutdown(ctx context.Context) error {
+func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 	p.stopOnce.Do(func() {
 		p.shutdown.Store(true)
 		close(p.doneCh)
@@ -108,9 +105,9 @@ func (p *Pool[T]) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (p *Pool[T]) Stop() { _ = p.Shutdown(context.Background()) }
+func (p *Pool[T, M]) Stop() { _ = p.Shutdown(context.Background()) }
 
-func (p *Pool[T]) Submit(job Job[T], basePrio int) error {
+func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 	if job.Ctx == nil {
 		job.Ctx = context.Background()
 	}
@@ -129,7 +126,7 @@ func (p *Pool[T]) Submit(job Job[T], basePrio int) error {
 	if ! ok {
 		return errors.New("queue is full")
 	}
-	p.incQueued()
+	p.metrics.IncQueued()
 
 	pj := p.pendingJobs.Add(1)
 	
@@ -165,7 +162,7 @@ func (p *Pool[T, M]) batchWorker(id int) {
 		}
 
 		deQueued := p.batchProcessJob()
-        p.batchDecQueued(deQueued)
+        p.metrics.BatchDecQueued(deQueued)
 		new := p.pendingJobs.Add(-int64(deQueued))
 		if new < 0 {
 		    p.pendingJobs.Store(0)
@@ -177,11 +174,10 @@ func (p *Pool[T, M]) batchWorker(id int) {
 		    return
 		}
 		p.idleWorkers <- wake
-
 	}
 }
 
-func (p *Pool[T]) batchTimer() {
+func (p *Pool[T, M]) batchTimer() {
     t := time.NewTicker(batchTimerInterval) 
     defer t.Stop()
 
@@ -213,6 +209,28 @@ func (p *Pool[T]) batchTimer() {
 
 // SetWorkerState marks worker id as active/inactive. It is called internally
 // by the pool when workers start or stop.
-func (p *Pool[T]) SetWorkerState(id int, state bool) {
-	p.metrics.workersActive[id].Store(state)
+//func (p *Pool[T, M]) SetWorkerState(id int, state bool) {
+//	p.metrics.setWorkerState(id, state)
+//}
+
+// Metrics returns a copy of the current metrics snapshot.
+func (p *Pool[T, M]) Metrics() *M {
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+	return &p.metrics
+}
+
+func (p *Pool[T, M]) SetWorkerState(id int, state bool) {
+    p.workersActive[id].Store(state)
+}
+
+// ActiveWorkers counts how many workers are currently marked active.
+func (p *Pool[T,M]) ActiveWorkers() int {
+	count := 0
+	for i := range p.workersActive {
+		if p.workersActive[i].Load() {
+			count++
+		}
+	}
+	return count
 }

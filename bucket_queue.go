@@ -1,6 +1,5 @@
 package workerpool
 
-//go:inline
 
 import (
 	"math/bits"
@@ -104,6 +103,7 @@ func (q *bucketQueue[T]) Len() int {
 func (q *bucketQueue[T]) MaxAge() time.Duration {
 	return 0
 }
+
 func (q *bucketQueue[T]) Push(job Job[T], basePrio int, now time.Time) bool {
 	seq := q.seq.Add(1)
 	idx := int(ComputeBucket(basePrio, q.aging, seq)) 

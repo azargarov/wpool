@@ -6,8 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
 	wp "github.com/azargarov/wpool"
+
+    "math/rand"
 
 	"log"
 	"net/http"
@@ -23,9 +24,10 @@ func startPprof() {
 }
 
 
-func getPool(opt wp.Options)* wp.Pool[int]{
+func getPool(opt wp.Options)* wp.Pool[int, *wp.NoopMetrics]{
 
-    return wp.NewPool[int](opt)
+    m := &wp.NoopMetrics{}
+    return wp.NewPool[int](opt, m)
 }
 
 
@@ -60,7 +62,7 @@ func BenchmarkMyPool_Mixed(b *testing.B) {
     b.Logf("MyPool_Mixed → %.2f Mjobs/sec in %.2fs", mps, elapsed.Seconds())
 }
 
-func BenchmarkMyPool_MixedReal_(b *testing.B) {
+func BenchmarkMyPool(b *testing.B) {
 
 
     if os.Getenv("PPROF") == "1" {
@@ -70,9 +72,8 @@ func BenchmarkMyPool_MixedReal_(b *testing.B) {
     runtime.SetBlockProfileRate(1)
     runtime.SetMutexProfileFraction(1)
 
-
     workers := runtime.GOMAXPROCS(0) 
-    queueSize := 200_000
+    queueSize := 100_000
 
     var counter int64
 
@@ -81,6 +82,7 @@ func BenchmarkMyPool_MixedReal_(b *testing.B) {
         AgingRate: 0,
         QueueSize: queueSize,
         QT:        wp.BucketQueue,
+        PinWorkers: false,
     }
 
     pool := getPool(opts)
@@ -127,14 +129,14 @@ func BenchmarkMyPool_MixedReal(b *testing.B) {
     runtime.SetMutexProfileFraction(1) 
     
     workers := runtime.GOMAXPROCS(0) 
-    queueSize := 100_000
+    queueSize := 200_000
     
     var counter int64
     var submitted int64
     
     opts := wp.Options{
         Workers:   workers,
-        AgingRate: 5,
+        AgingRate: 0,
         QueueSize: queueSize,
         QT:        wp.BucketQueue,
     }
@@ -148,7 +150,7 @@ func BenchmarkMyPool_MixedReal(b *testing.B) {
         atomic.AddInt64(&counter, 1)
         var count int64
         var f float64
-        for i := range int64(1){
+        for i := range int64(10){
             count += i * i
             f += float64(i) / float64(count)
         }
@@ -200,3 +202,92 @@ func BenchmarkMyPool_MixedReal(b *testing.B) {
 //  watch -n 0.2 "grep 'MHz' /proc/cpuinfo | head -n 8"
 // sudo cpupower frequency-set -g performance
 //sudo cpupower frequency-set -g schedutil
+
+
+func BenchmarkMyPool_MixedReal__(b *testing.B) {
+    workers := runtime.GOMAXPROCS(0)
+    queueSize := 4_000_000
+
+    var counter int64
+
+    opts := wp.Options{
+        Workers:   workers,
+        AgingRate: 0,
+        QueueSize: queueSize,
+        QT:        wp.BucketQueue,
+    }
+
+    pool := getPool(opts)
+    defer pool.Shutdown(context.Background())
+
+    jobs := []wp.Job[int]{
+        {Fn: func(_ int) error {
+            atomic.AddInt64(&counter, 1)
+            runtime.Gosched()
+            return nil
+        }},
+        {Fn: func(_ int) error {
+            atomic.AddInt64(&counter, 1) 
+            sum := 0
+            for i := range 100 {
+                sum += i*i
+            }
+            return nil
+        }},
+        {Fn: func(_ int) error {
+            atomic.AddInt64(&counter, 1)
+            timer := time.NewTimer(2 * time.Microsecond)
+            select {
+            case <-timer.C:
+            default:
+            }
+            timer.Stop()
+            return nil
+        }},
+        {Fn: func(_ int) error {
+            atomic.AddInt64(&counter, 1)
+            var h uint64 = 42
+            for i := range 1_000 {
+                h = h*31 + uint64(i)
+            }
+            return nil
+        }},
+    }
+
+    rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+    b.ResetTimer()
+    start := time.Now()
+    var i int64
+    b.RunParallel(func(pb *testing.PB) {
+        for pb.Next() {
+            j := rng.Uint64() % uint64(len(jobs))
+            job := jobs[j]
+            i ++
+            _ = pool.Submit(job, int(j))
+        }
+    })
+
+    //t := time.NewTicker(2 * time.Second)
+    //fmt.Println(i)
+    //go func() {
+    //    defer t.Stop()
+    //    for range t.C {
+    //        c := atomic.LoadInt64(&counter)
+    //        fmt.Printf("progress: counter = %d, b.N = %d \n", c, b.N)
+    //        //fmt.Println(pool.GetIdleLen())
+    //    }
+    //}()
+    
+    // Wait for completion
+    for atomic.LoadInt64(&counter) < int64(b.N) {
+        runtime.Gosched()
+    }
+
+    //t.Stop()
+
+    elapsed := time.Since(start)
+    mps := float64(b.N) / elapsed.Seconds() / 1e6
+    b.ReportMetric(mps, "Mjobs/sec")
+    b.Logf("MyPool_MixedReal → %.2f Mjobs/sec in %.2fs", mps, elapsed.Seconds())
+}

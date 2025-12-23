@@ -17,7 +17,7 @@ var queueTypes = []wp.QueueType{
 	wp.BucketQueue,
 }
 
-func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int] {
+func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int, *wp.NoopMetrics] {
 	opts := wp.Options{
 		Workers:    workers,
 		AgingRate:  3,
@@ -25,7 +25,8 @@ func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int] {
 		QueueSize:  4_000_000,
 		QT:         qt,
 	}
-	return wp.NewPool[int](opts)
+	m := &wp.NoopMetrics{}
+	return wp.NewPool[int](opts, m)
 }
 
 func TestFillDefaults(t *testing.T) {

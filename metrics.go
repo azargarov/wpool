@@ -2,56 +2,52 @@ package workerpool
 
 import (
 	"sync/atomic"
-	//"time"
 )
+
+type MetricsPolicy interface{
+	Executed()  
+	IncExecuted() 
+	Queued()  
+	IncQueued() 
+	BatchDecQueued(n int64) 
+}
 
 // Metrics is a snapshot of pool internals useful for monitoring.
 // All fields are read-only through accessor methods.
-type Metrics struct {
+type AtomicMetrics struct {
 	executed      atomic.Uint64
+	_        	  [56]byte		
 	queued        atomic.Int64
-	workersActive []atomic.Bool
-}
-
-
-// Metrics returns a copy of the current metrics snapshot.
-func (p *Pool[T]) Metrics() *Metrics {
-	p.metricsMu.Lock()
-	defer p.metricsMu.Unlock()
-	return &p.metrics
 }
 
 // Executed returns the total number of jobs processed by workers
 // (including canceled ones).
-func (p *Pool[T]) Executed() uint64 { 
-	return p.metrics.executed.Load() 
+func (m *AtomicMetrics) Executed()  { 
+	m.executed.Load() 
 }
 
-func (p *Pool[T]) incExecuted() uint64  { 
-	return p.metrics.executed.Add(1) 
+func (m *AtomicMetrics) IncExecuted() { 
+	m.executed.Add(1) 
 }
 
-
-
-// ActiveWorkers counts how many workers are currently marked active.
-func (p *Pool[T]) ActiveWorkers() int {
-	count := 0
-	for i := range p.metrics.workersActive {
-		if p.metrics.workersActive[i].Load() {
-			count++
-		}
-	}
-	return count
+func (m *AtomicMetrics) Queued()  { 
+	m.queued.Load() 
 }
 
-func (p *Pool[T]) Queued() int64 { 
-	return p.metrics.queued.Load() 
+func (m *AtomicMetrics) IncQueued() {
+	m.queued.Add(1)
 }
 
-func (p *Pool[T]) incQueued() int64 {
-	return p.metrics.queued.Add(1)
+func (m  *AtomicMetrics) BatchDecQueued(n int64) {
+	m.queued.Add(-n)
 }
 
-func (p *Pool[T]) batchDecQueued(n int64) int64{
-	return p.metrics.queued.Add(-n)
-}
+//-------------------------------------------------
+
+type NoopMetrics struct {}
+func (m *NoopMetrics) Executed() 	 {}
+func (m *NoopMetrics) IncExecuted()   {}
+func (m *NoopMetrics) Queued() 		 {}
+func (m *NoopMetrics) IncQueued() 	 {}
+func (m  *NoopMetrics) BatchDecQueued(n int64) {}
+

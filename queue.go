@@ -1,6 +1,6 @@
 package workerpool
 
-//go:inline
+
 
 import (
 	"time"
@@ -91,7 +91,7 @@ type schedQueue[T any] interface {
 	MaxAge() time.Duration
 }
 
-func (p *Pool[T]) makeQueue() schedQueue[T] {
+func (p *Pool[T,M]) makeQueue() schedQueue[T] {
 	switch p.opts.QT {
 	case Fifo:
 		return NewFifoQueue[T](initialFifoCapacity)
