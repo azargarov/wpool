@@ -68,6 +68,8 @@ type Options struct {
 	// or Conditional for custom or experimental logic.
 	QT QueueType
 
+	PinWorkers bool
+
 }
 
 func (o *Options) FillDefaults() {

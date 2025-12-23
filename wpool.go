@@ -149,8 +149,10 @@ func (p *Pool[T]) Submit(job Job[T], basePrio int) error {
 	return nil
 }
 
-
-func (p *Pool[T]) batchWorker(id int) {
+func (p *Pool[T, M]) batchWorker(id int) {
+	if p.opts.PinWorkers{
+		PinToCPU(id % runtime.NumCPU())
+	}
 	defer p.SetWorkerState(id, false)
 
 	wake := p.wakes[id]
