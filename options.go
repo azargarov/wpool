@@ -33,6 +33,8 @@ const (
 	// and static aging without periodic rebalancing.
 	BucketQueue
 
+	SegmentedQueue
+
 	ShardedQueue
 )
 
@@ -101,6 +103,8 @@ func (qt QueueType) String() string {
 		return "BucketQueue"	
 	case ShardedQueue:
 		return "ShardedQueue"
+	case SegmentedQueue:
+		return "SegmentedQueue"
 	default:
 		return "Unknown"
 	}

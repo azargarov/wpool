@@ -100,8 +100,8 @@ func (p *Pool[T,M]) makeQueue() schedQueue[T] {
 		return NewFifoQueue[T](initialFifoCapacity)
 	case BucketQueue:
 		return NewBucketQueue[T](p.opts.AgingRate, p.opts.QueueSize)	
-	case ShardedQueue:
-		return newShardedBucketQueue[T](defaultShardNum,p.opts.AgingRate, initialBucketSize)
+	case SegmentedQueue:
+		return NewSegmentedQ[T](DefaultSegmentSize)
 
 	default:
 		return NewFifoQueue[T](initialFifoCapacity)
