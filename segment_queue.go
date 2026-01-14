@@ -122,7 +122,7 @@ func (q *segmentedQ[T]) BatchPop() ([]Job[T], bool) {
 			return nil, false
 		}
 
-		// Now h == pageSize: segment fully consumed
+		// segment fully consumed
 		next := seg.next.Load()
 		if next == nil {
 			return nil, false

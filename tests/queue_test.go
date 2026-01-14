@@ -8,7 +8,7 @@ import(
 
 func BenchmarkBucketQueue_PushOnly(b *testing.B) {
 
-    q := wp.NewSegmentedQ[int](64, 64)
+    q := wp.NewSegmentedQ[int](4096, 16256)
     baseJob := wp.Job[int]{Fn: func(int) error { return nil }}
 
     b.ReportAllocs()
@@ -19,7 +19,7 @@ func BenchmarkBucketQueue_PushOnly(b *testing.B) {
 }
 
 func BenchmarkBucketQueue_PopOnly(b *testing.B) {
-    q := wp.NewSegmentedQ[int](64, 64)
+    q := wp.NewSegmentedQ[int](4096, 16256)
     job := wp.Job[int]{Fn: func(int) error { return nil }}
 
     const prefill = 4096 

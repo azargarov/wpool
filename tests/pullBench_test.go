@@ -43,7 +43,7 @@ func BenchmarkMyPool_MixedReal(b *testing.B) {
     workers := runtime.GOMAXPROCS(0) 
     
     var counter int64
-    var submitted int64
+    //var submitted int64
     
     opts := wp.Options{
         Workers:        workers,
@@ -56,17 +56,17 @@ func BenchmarkMyPool_MixedReal(b *testing.B) {
     pool := getPool(opts)
     defer pool.Shutdown(context.Background())
     
-	var sink int64
+	//var sink int64
     
     job := wp.Job[int]{Fn: func(int) error {
         atomic.AddInt64(&counter, 1)
-        var count int64
-        var f float64
-        for i := range int64(10){
-            count += i * i
-            f += float64(i) / float64(count)
-        }
-        atomic.AddInt64(&sink, count)
+        //var count int64
+        //var f float64
+        //for i := range int64(10){
+        //    count += i * i
+        //    f += float64(i) / float64(count)
+        //}
+        //atomic.AddInt64(&sink, count)
         ////time.Sleep(time.Microsecond * 10)
         return nil
     }}
@@ -91,7 +91,7 @@ func BenchmarkMyPool_MixedReal(b *testing.B) {
             if err != nil {
                 panic(err)
             }
-            atomic.AddInt64(&submitted, 1)
+            //atomic.AddInt64(&submitted, 1)
         }
     })
     
