@@ -28,9 +28,6 @@ func getPool(opt wp.Options)* wp.Pool[int, *wp.NoopMetrics]{
     return wp.NewPool[int](opt, m)
 }
 
-
-
-
 func BenchmarkMyPool_MixedReal(b *testing.B) {
 
     if os.Getenv("PPROF") == "1" {
