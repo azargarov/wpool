@@ -11,28 +11,23 @@ import (
 )
 
 var queueTypes = []wp.QueueType{
-	//wp.Fifo,
-	//wp.Priority,
-	//wp.Conditional,
-	wp.BucketQueue,
+	wp.SegmentedQueue,
 }
 
 func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int, *wp.NoopMetrics] {
 	opts := wp.Options{
 		Workers:    workers,
-		AgingRate:  3,
-		RebuildDur: 10 * time.Millisecond,
-		QueueSize:  4_000_000,
 		QT:         qt,
 	}
 	m := &wp.NoopMetrics{}
 	return wp.NewPool[int](opts, m)
 }
 
+//TODO: add more checks
 func TestFillDefaults(t *testing.T) {
 	var o wp.Options
 	o.FillDefaults()
-	if o.Workers <= 0 || o.QueueSize <= 0 {
+	if o.Workers <= 0  {
 		t.Fatal("defaults not filled")
 	}
 }

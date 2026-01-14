@@ -9,21 +9,7 @@ import(
 
 func BenchmarkBucketQueue_PushOnly(b *testing.B) {
 
-    q := wp.NewBucketQueue[int](3, 100)
-    baseJob := wp.Job[int]{Fn: func(int) error { return nil }}
-    now := time.Now()
-
-    b.ReportAllocs()
-    b.ResetTimer()
-
-    for i := 0; i < b.N; i++ {
-        q.Push(baseJob, 0, now)
-    }
-}
-
-func BenchmarkFifoQueue_PushOnly(b *testing.B) {
-
-    q := wp.NewFifoQueue[int](3000)
+    q := wp.NewSegmentedQ[int](64, 64)
     baseJob := wp.Job[int]{Fn: func(int) error { return nil }}
     now := time.Now()
 
@@ -36,7 +22,7 @@ func BenchmarkFifoQueue_PushOnly(b *testing.B) {
 }
 
 func BenchmarkBucketQueue_PopOnly(b *testing.B) {
-    q := wp.NewBucketQueue[int](0, 100)
+    q := wp.NewSegmentedQ[int](64, 64)
     job := wp.Job[int]{Fn: func(int) error { return nil }}
     now := time.Now()
 
@@ -46,9 +32,9 @@ func BenchmarkBucketQueue_PopOnly(b *testing.B) {
     }
 
     b.ReportAllocs()
-    b.ResetTimer()
+    
 
-    for i := 0; i < b.N; i++ {
+    for b.Loop() {
         _, ok := q.Pop(now)
         if !ok {
             b.Fatal("queue unexpectedly empty")
@@ -58,7 +44,7 @@ func BenchmarkBucketQueue_PopOnly(b *testing.B) {
 }
 
 func BenchmarkBucketQueue_PushPop(b *testing.B) {
-    q := wp.NewBucketQueue[int](3, 100)
+    q := wp.NewSegmentedQ[int](64, 64)
     job := wp.Job[int]{Fn: func(int) error { return nil }}
     now := time.Now()
 

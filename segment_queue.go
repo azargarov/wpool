@@ -1,52 +1,58 @@
 package workerpool
 
-import(
+import (
+	"golang.org/x/sys/cpu"
+	"runtime"
 	"sync/atomic"
-	//"sync"
 	"time"
 )
 
+// TODO: pass it as parameters to constructor
 const (
-	DefaultSegmentSize  = 2048
-	DefaultSegmentCount = 32512
+	DefaultSegmentSize = 4096
 )
 
-type cacheLinePad struct{
-	_ [64]byte
+var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
+
+type segment[T any] struct {
+	head    uint32
+	_       cpu.CacheLinePad
+	tail    uint32
+	_       cpu.CacheLinePad
+	reserve uint32
+	_       cpu.CacheLinePad
+	next    atomic.Pointer[segment[T]]
+	_       cpu.CacheLinePad
+
+	buf   []Job[T]
+	ready []uint32
 }
 
-type segment[T any] struct{
-	head 	uint32
-	_ 		cacheLinePad
-	tail 	uint32
-	_ 		cacheLinePad
-	next	atomic.Pointer[segment[T]]
-	_ 		cacheLinePad
-	buf 	[]Job[T]
+type segmentedQ[T any] struct {
+	head     atomic.Pointer[segment[T]]
+	tail     atomic.Pointer[segment[T]]
+	pageSize uint32
 }
 
-
-type segmentedQ[T any] struct{
-	head 		atomic.Pointer[segment[T]]
-	tail 		atomic.Pointer[segment[T]]
-
-	pageSize	uint32
+func mkSegment[T any](segSize uint32) *segment[T] {
+	return &segment[T]{
+		buf:   make([]Job[T], segSize),
+		ready: make([]uint32, segSize),
+	}
 }
 
-func NewSegmentedQ[T any](segSize uint32) *segmentedQ[T]{
+func NewSegmentedQ[T any](segSize uint32, segCount uint32) *segmentedQ[T] {
 	q := &segmentedQ[T]{
 		pageSize: segSize,
 	}
 
 	var first, prev *segment[T]
 
-	for i:=0; i < DefaultSegmentCount; i++{
-		s:= &segment[T]{
-			buf: make([]Job[T], segSize),
-		}
-		if prev != nil{
+	for range segCount {
+		s := mkSegment[T](segSize)
+		if prev != nil {
 			prev.next.Store(s)
-		}else{
+		} else {
 			first = s
 		}
 		prev = s
@@ -57,84 +63,105 @@ func NewSegmentedQ[T any](segSize uint32) *segmentedQ[T]{
 	return q
 }
 
-
-func (q *segmentedQ[T]) Push(v Job[T], basePrio int, now time.Time) bool{
+func (q *segmentedQ[T]) Push(v Job[T], _ int, _ time.Time) bool {
 	for {
-		tail := q.tail.Load()
-		t := atomic.LoadUint32(&tail.tail)
+		seg := q.tail.Load()
 
-		if t < q.pageSize {
-			if atomic.CompareAndSwapUint32(&tail.tail, t, t+1) {
-				tail.buf[t] = v
+		// reserve slot
+		for {
+			r := atomic.LoadUint32(&seg.reserve)
+			if r >= q.pageSize {
+				break
+			}
+			if atomic.CompareAndSwapUint32(&seg.reserve, r, r+1) {
+				seg.buf[r] = v
+				atomic.StoreUint32(&seg.ready[r], 1)
 				return true
 			}
-			continue
 		}
 
-		next := tail.next.Load()
+		// segment full -> ensure next and advance tail
+		next := seg.next.Load()
 		if next == nil {
-			return false
-		} 
-		q.tail.CompareAndSwap(tail, next)
-		
+			newSeg := mkSegment[T](q.pageSize)
+			if seg.next.CompareAndSwap(nil, newSeg) {
+				next = newSeg
+			} else {
+				next = seg.next.Load()
+			}
+		}
+		q.tail.CompareAndSwap(seg, next)
 	}
 }
 
 // NOTE:
 // Segments are never reclaimed in the base queue
-// Once published via next, a segment remains valid 
+// Once published via next, a segment remains valid
 // for the lifetime of the queue
 func (q *segmentedQ[T]) Pop(_ time.Time) (Job[T], bool) {
-var zero Job[T]
+	var zero Job[T]
+	return zero, false
+	//	for {
+	//		head := q.head.Load()
+	//		h := atomic.LoadUint32(&head.head)
+	//		t := atomic.LoadUint32(&head.tail)
+	//
+	//		if h < t {
+	//			if atomic.CompareAndSwapUint32(&head.head, h, h+1) {
+	//				return head.buf[h], true
+	//			}
+	//			continue
+	//		}
+	//		next := head.next.Load()
+	//		if next == nil {
+	//			next = mkSegment[T](q.pageSize)
+	//			return zero, false
+	//		}
+	//
+	//		q.head.CompareAndSwap(head, next)
+	//
+	// }
+}
 
+// BatchPop returns all currently availiable items
+// from the current head segment.
+// A segment is treated as a natural execution batch
+func (q *segmentedQ[T]) BatchPop() ([]Job[T], bool) {
 	for {
-		head := q.head.Load()
-		h := atomic.LoadUint32(&head.head)
-		t := atomic.LoadUint32(&head.tail)
-		
-		if h < t {
-			if atomic.CompareAndSwapUint32(&head.head, h, h+1) {
-				return head.buf[h], true
+		seg := q.head.Load()
+		h := atomic.LoadUint32(&seg.head)
+
+		//avoids scanning empty tail space.
+		r := atomic.LoadUint32(&seg.reserve)
+		limit := min(r, q.pageSize)
+
+		// Scan forward while slots are ready
+		end := h
+		for end < limit && atomic.LoadUint32(&seg.ready[end]) == 1 {
+			end++
+		}
+
+		// Return a batch if we found any ready items
+		if end > h {
+			if atomic.CompareAndSwapUint32(&seg.head, h, end) {
+				return seg.buf[h:end], true
 			}
 			continue
 		}
-		next := head.next.Load()
-		if next == nil {
-			return zero, false
+
+		// No ready items at current head.
+		// IMPORTANT: do NOT move to next unless fully drained.
+		if h < q.pageSize {
+			return nil, false
 		}
 
-		q.head.CompareAndSwap(head, next) 
-
+		// Now h == pageSize: segment fully consumed
+		next := seg.next.Load()
+		if next == nil {
+			return nil, false
+		}
+		q.head.CompareAndSwap(seg, next)
 	}
 }
 
-//BatchPop returns all currently availiable items
-//from the current head segment.
-//A segment is treated as a natural execution batch
-func 	(q *segmentedQ[T])BatchPop() ([]Job[T], bool){
-	var zero []Job[T]
-	for {
-		head := q.head.Load()
-		h := atomic.LoadUint32(&head.head)
-		t := atomic.LoadUint32(&head.tail)
-
-		if h < t {
-			if atomic.CompareAndSwapUint32(&head.head, h, t) {
-				return head.buf[h:t], true
-			}
-			continue
-		}
-		next := head.next.Load()
-		if next == nil {
-			return zero, false
-		}
-
-		q.head.CompareAndSwap(head, next) 
-	}
-}
-
-func 	(q *segmentedQ[T])Tick(now time.Time){}
-
-func 	(q *segmentedQ[T])Len() int{return 0}
-
-func 	(q *segmentedQ[T])MaxAge() time.Duration{return 0}
+func (q *segmentedQ[T]) Len() int { return 0 }

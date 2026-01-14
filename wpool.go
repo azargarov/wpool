@@ -1,7 +1,5 @@
 package workerpool
 
-//go:inline
-
 import (
 	"context"
 	"errors"
@@ -13,9 +11,8 @@ import (
 )
 
 const (
-	DefaultMaxWorkers   = 10
-	defaultBatch		= 512
-	batchTimerInterval  = 50*time.Microsecond
+	defaultBatch       = 512
+	batchTimerInterval = 50 * time.Microsecond
 )
 
 type JobFunc[T any] func(T) error
@@ -23,48 +20,48 @@ type JobFunc[T any] func(T) error
 type WakeupWorker chan struct{}
 
 type Job[T any] struct {
-	Payload T
-	Fn JobFunc[T]
-	Ctx context.Context
+	Payload     T
+	Fn          JobFunc[T]
+	Ctx         context.Context
 	CleanupFunc func()
 }
 
 type Pool[T any, M MetricsPolicy] struct {
-	stopOnce     sync.Once
-	opts         Options
-	shutdown	 atomic.Bool
-	doneCh       chan struct{}
-	metricsMu    sync.Mutex
-	metrics      M
-	queue 		 schedQueue[T]
-	wakes 		 []WakeupWorker
-	idleWorkers  chan WakeupWorker
+	stopOnce      sync.Once
+	opts          Options
+	shutdown      atomic.Bool
+	doneCh        chan struct{}
+	metricsMu     sync.Mutex
+	metrics       M
+	queue         schedQueue[T]
+	wakes         []WakeupWorker
+	idleWorkers   chan WakeupWorker
 	workersActive []atomic.Bool
 
-	pendingJobs   atomic.Int64  // scheduling counter, not metrics
-	batchInFlight atomic.Bool   // only one wake trigger at a time
-	lastDrainNano atomic.Int64  // for timer (optional but recommended)
+	pendingJobs   atomic.Int64 // scheduling counter, not metrics
+	batchInFlight atomic.Bool  // only one wake trigger at a time
+	lastDrainNano atomic.Int64 // for timer (optional but recommended)
 
 }
 
-func (p * Pool[T, M])GetIdleLen()int64{
+func (p *Pool[T, M]) GetIdleLen() int64 {
 	return int64(len(p.idleWorkers))
 }
 
-func NewPool[T any, M MetricsPolicy](opts Options, metrics M) *Pool[T, M]{ 
+func NewPool[T any, M MetricsPolicy](opts Options, metrics M) *Pool[T, M] {
 	opts.FillDefaults()
 
 	p := &Pool[T, M]{
-		opts:         opts,
-		doneCh:       make(chan struct{}),
-		idleWorkers: make(chan WakeupWorker, opts.Workers),
+		opts:          opts,
+		doneCh:        make(chan struct{}),
+		idleWorkers:   make(chan WakeupWorker, opts.Workers),
 		workersActive: make([]atomic.Bool, opts.Workers),
 	}
 	p.queue = p.makeQueue()
 	p.metrics = metrics
 	p.wakes = make([]WakeupWorker, opts.Workers)
 	for i := 0; i < opts.Workers; i++ {
-	    p.wakes[i] = make(WakeupWorker,1)
+		p.wakes[i] = make(WakeupWorker, 1)
 	}
 
 	for i := 0; i < opts.Workers; i++ {
@@ -85,11 +82,11 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 		p.shutdown.Store(true)
 		close(p.doneCh)
 
-    	for _, w := range p.wakes {
-    	    if w != nil {
-    	        close(w)
-    	    }
-    	}
+		for _, w := range p.wakes {
+			if w != nil {
+				close(w)
+			}
+		}
 	})
 
 	for {
@@ -112,7 +109,7 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 		job.Ctx = context.Background()
 	}
 
-	if p.shutdown.Load(){
+	if p.shutdown.Load() {
 		return fmt.Errorf("workerpool: pool closed")
 	}
 
@@ -123,31 +120,31 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 	}
 
 	ok := p.queue.Push(job, basePrio, time.Now())
-	if ! ok {
+	if !ok {
 		return errors.New("queue is full")
 	}
 	p.metrics.IncQueued()
 
 	pj := p.pendingJobs.Add(1)
-	
+
 	if pj < defaultBatch {
-	    return nil
+		return nil
 	}
 
 	if p.batchInFlight.CompareAndSwap(false, true) {
-	    select {
-	    case w := <-p.idleWorkers:
-	        w <- struct{}{}
-	        p.lastDrainNano.Store(time.Now().UnixNano()) // 👈 reset signal
-	    default:
-	        p.batchInFlight.Store(false)
-	    }
+		select {
+		case w := <-p.idleWorkers:
+			w <- struct{}{}
+			p.lastDrainNano.Store(time.Now().UnixNano()) // 👈 reset signal
+		default:
+			p.batchInFlight.Store(false)
+		}
 	}
 	return nil
 }
 
 func (p *Pool[T, M]) batchWorker(id int) {
-	if p.opts.PinWorkers{
+	if p.opts.PinWorkers {
 		PinToCPU(id % runtime.NumCPU())
 	}
 	defer p.SetWorkerState(id, false)
@@ -162,49 +159,49 @@ func (p *Pool[T, M]) batchWorker(id int) {
 		}
 
 		deQueued := p.batchProcessJob()
-        p.metrics.BatchDecQueued(deQueued)
+		p.metrics.BatchDecQueued(deQueued)
 		new := p.pendingJobs.Add(-int64(deQueued))
 		if new < 0 {
-		    p.pendingJobs.Store(0)
+			p.pendingJobs.Store(0)
 		}
 		p.batchInFlight.Store(false)
 		p.lastDrainNano.Store(time.Now().UnixNano())
 
 		if p.shutdown.Load() {
-		    return
+			return
 		}
 		p.idleWorkers <- wake
 	}
 }
 
 func (p *Pool[T, M]) batchTimer() {
-    t := time.NewTicker(batchTimerInterval) 
-    defer t.Stop()
+	t := time.NewTicker(batchTimerInterval)
+	defer t.Stop()
 
-    for {
-        select {
-        case <-t.C:
-            if p.shutdown.Load() {
-                return
-            }
-            if p.pendingJobs.Load() == 0 {
-                continue
-            }
-            if time.Since(time.Unix(0, p.lastDrainNano.Load())) < batchTimerInterval {
-                continue
-            }
-            if p.batchInFlight.CompareAndSwap(false, true) {
-                select {
-                case w := <-p.idleWorkers:
-                    w <- struct{}{}
-                default:
-                    p.batchInFlight.Store(false)
-                }
-            }
-        case <-p.doneCh:
-            return
-        }
-    }
+	for {
+		select {
+		case <-t.C:
+			if p.shutdown.Load() {
+				return
+			}
+			if p.pendingJobs.Load() == 0 {
+				continue
+			}
+			if time.Since(time.Unix(0, p.lastDrainNano.Load())) < batchTimerInterval {
+				continue
+			}
+			if p.batchInFlight.CompareAndSwap(false, true) {
+				select {
+				case w := <-p.idleWorkers:
+					w <- struct{}{}
+				default:
+					p.batchInFlight.Store(false)
+				}
+			}
+		case <-p.doneCh:
+			return
+		}
+	}
 }
 
 // SetWorkerState marks worker id as active/inactive. It is called internally
@@ -221,11 +218,11 @@ func (p *Pool[T, M]) Metrics() *M {
 }
 
 func (p *Pool[T, M]) SetWorkerState(id int, state bool) {
-    p.workersActive[id].Store(state)
+	p.workersActive[id].Store(state)
 }
 
 // ActiveWorkers counts how many workers are currently marked active.
-func (p *Pool[T,M]) ActiveWorkers() int {
+func (p *Pool[T, M]) ActiveWorkers() int {
 	count := 0
 	for i := range p.workersActive {
 		if p.workersActive[i].Load() {
