@@ -4,7 +4,6 @@ import (
 	"golang.org/x/sys/cpu"
 	"runtime"
 	"sync/atomic"
-	"time"
 )
 
 // TODO: pass it as parameters to constructor
@@ -63,7 +62,7 @@ func NewSegmentedQ[T any](segSize uint32, segCount uint32) *segmentedQ[T] {
 	return q
 }
 
-func (q *segmentedQ[T]) Push(v Job[T], _ int, _ time.Time) bool {
+func (q *segmentedQ[T]) Push(v Job[T]) bool {
 	for {
 		seg := q.tail.Load()
 
@@ -94,38 +93,7 @@ func (q *segmentedQ[T]) Push(v Job[T], _ int, _ time.Time) bool {
 	}
 }
 
-// NOTE:
-// Segments are never reclaimed in the base queue
-// Once published via next, a segment remains valid
-// for the lifetime of the queue
-func (q *segmentedQ[T]) Pop(_ time.Time) (Job[T], bool) {
-	var zero Job[T]
-	return zero, false
-	//	for {
-	//		head := q.head.Load()
-	//		h := atomic.LoadUint32(&head.head)
-	//		t := atomic.LoadUint32(&head.tail)
-	//
-	//		if h < t {
-	//			if atomic.CompareAndSwapUint32(&head.head, h, h+1) {
-	//				return head.buf[h], true
-	//			}
-	//			continue
-	//		}
-	//		next := head.next.Load()
-	//		if next == nil {
-	//			next = mkSegment[T](q.pageSize)
-	//			return zero, false
-	//		}
-	//
-	//		q.head.CompareAndSwap(head, next)
-	//
-	// }
-}
 
-// BatchPop returns all currently availiable items
-// from the current head segment.
-// A segment is treated as a natural execution batch
 func (q *segmentedQ[T]) BatchPop() ([]Job[T], bool) {
 	for {
 		seg := q.head.Load()
@@ -150,7 +118,6 @@ func (q *segmentedQ[T]) BatchPop() ([]Job[T], bool) {
 		}
 
 		// No ready items at current head.
-		// IMPORTANT: do NOT move to next unless fully drained.
 		if h < q.pageSize {
 			return nil, false
 		}

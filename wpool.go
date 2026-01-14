@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	defaultBatch       = 512
-	batchTimerInterval = 50 * time.Microsecond
+	defaultPushBatch       = 512
+	batchTimerInterval 	   = 50 * time.Microsecond
 )
 
 type JobFunc[T any] func(T) error
@@ -119,7 +119,7 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 	default:
 	}
 
-	ok := p.queue.Push(job, basePrio, time.Now())
+	ok := p.queue.Push(job)
 	if !ok {
 		return errors.New("queue is full")
 	}
@@ -127,7 +127,7 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 
 	pj := p.pendingJobs.Add(1)
 
-	if pj < defaultBatch {
+	if pj < defaultPushBatch {
 		return nil
 	}
 
@@ -203,12 +203,6 @@ func (p *Pool[T, M]) batchTimer() {
 		}
 	}
 }
-
-// SetWorkerState marks worker id as active/inactive. It is called internally
-// by the pool when workers start or stop.
-//func (p *Pool[T, M]) SetWorkerState(id int, state bool) {
-//	p.metrics.setWorkerState(id, state)
-//}
 
 // Metrics returns a copy of the current metrics snapshot.
 func (p *Pool[T, M]) Metrics() *M {
