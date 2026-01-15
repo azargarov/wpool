@@ -6,11 +6,20 @@ import (
 	"sync/atomic"
 )
 
-// TODO: pass it as parameters to constructor
 const (
+	// DefaultSegmentSize is the number of jobs stored in a single segment.
+	// It must remain stable for the lifetime of a segmented queue.
+	//
+	// Larger values reduce segment churn but increase cache pressure
+	// and batch scan cost.
 	DefaultSegmentSize = 4096
 )
 
+// DefaultSegmentCount defines how many segments are preallocated when
+// creating a segmented queue.
+//
+// The default scales with GOMAXPROCS to reduce contention and amortize
+// allocation cost under parallel producers.
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
 
 type segment[T any] struct {
@@ -22,17 +31,31 @@ type segment[T any] struct {
 	_       cpu.CacheLinePad
 	next    atomic.Pointer[segment[T]]
 	_       cpu.CacheLinePad
-
+	
 	buf   []Job[T]
 	ready []uint32
 }
 
+// segmentedQ is a lock-free, append-only segmented queue.
+//
+// It supports multiple concurrent producers and a single or multiple
+// consumers calling BatchPop.
+//
+// The queue grows by linking new segments when capacity is exhausted.
+// Segments are never reused once fully consumed.
 type segmentedQ[T any] struct {
+	// head points to the segment currently being consumed.
 	head     atomic.Pointer[segment[T]]
+
+	// tail points to the segment currently being appended to.	
 	tail     atomic.Pointer[segment[T]]
+
+	// pageSize is the fixed capacity of each segment.
 	pageSize uint32
 }
 
+// mkSegment allocates and initializes a new empty segment
+// with the given capacity.
 func mkSegment[T any](segSize uint32) *segment[T] {
 	return &segment[T]{
 		buf:   make([]Job[T], segSize),
@@ -40,6 +63,13 @@ func mkSegment[T any](segSize uint32) *segment[T] {
 	}
 }
 
+// NewSegmentedQ creates a new segmented queue with fixed-size segments.
+//
+// segSize defines the number of jobs per segment.
+// segCount defines how many segments are eagerly preallocated and linked.
+//
+// The queue supports concurrent producers without locks.
+// Consumers retrieve work using BatchPop.
 func NewSegmentedQ[T any](segSize uint32, segCount uint32) *segmentedQ[T] {
 	q := &segmentedQ[T]{
 		pageSize: segSize,
@@ -62,6 +92,14 @@ func NewSegmentedQ[T any](segSize uint32, segCount uint32) *segmentedQ[T] {
 	return q
 }
 
+// Push appends a job to the queue.
+//
+// Push is lock-free and safe for concurrent use by multiple producers.
+// It returns true once the job has been fully published and is visible
+// to consumers.
+//
+// The call may allocate a new segment if the current tail segment
+// becomes full.
 func (q *segmentedQ[T]) Push(v Job[T]) bool {
 	for {
 		seg := q.tail.Load()
@@ -93,7 +131,16 @@ func (q *segmentedQ[T]) Push(v Job[T]) bool {
 	}
 }
 
-
+// BatchPop returns a contiguous batch of ready jobs from the head segment.
+//
+// The returned slice is backed by the queue's internal buffer and must
+// be treated as read-only.
+//
+// The boolean result reports whether any jobs were returned.
+// If false, the queue is currently empty or no ready jobs are available.
+//
+// BatchPop is lock-free and may be called concurrently by multiple consumers,
+// though typical usage assumes a single draining goroutine.
 func (q *segmentedQ[T]) BatchPop() ([]Job[T], bool) {
 	for {
 		seg := q.head.Load()
@@ -131,4 +178,6 @@ func (q *segmentedQ[T]) BatchPop() ([]Job[T], bool) {
 	}
 }
 
+// Len should returns an approximate number of jobs in the queue.
+//
 func (q *segmentedQ[T]) Len() int { return 0 }

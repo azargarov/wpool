@@ -1,8 +1,6 @@
-// Package workerpool provides a bounded-concurrency worker pool with
-// priority scheduling, aging (to prevent starvation), per-job retry
-// policies, context-aware backoff, panic-safe workers, and basic metrics.
+// Package workerpool provides high-performance concurrency primitives
+// for building scalable worker pools and schedulers.
 //
-// Jobs are submitted together with a base priority; the scheduler keeps
-// them in a heap and periodically "ages" them so old low-priority jobs
-// still get executed.
+// The package focuses on minimizing allocations, avoiding locks on hot paths,
+// and providing predictable latency under high contention.
 package workerpool
