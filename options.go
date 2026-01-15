@@ -10,6 +10,9 @@ import (
 // and selected for execution by the scheduler.
 type QueueType int
 
+// Option configures a worker Pool.
+type Option func(*Options)
+
 const (
 	// SegmentedQueue uses a lock-free segmented FIFO queue.
 	//
@@ -48,6 +51,41 @@ type Options struct {
 	// When enabled, workers may be locked to OS threads to reduce
 	// migration and improve cache locality.
 	PinWorkers bool
+}
+
+// WithWorkers sets the number of worker goroutines.
+func WithWorkers(n int) Option {
+	return func(o *Options) {
+		o.Workers = n
+	}
+}
+
+// WithSegmentSize sets the queue segment size.
+func WithSegmentSize(n int) Option {
+	return func(o *Options) {
+		o.SegmentSize = n
+	}
+}
+
+// WithSegmentCount sets the queue initial segment count.
+func WithSegmentCount(n int) Option {
+	return func(o *Options) {
+		o.SegmentCount = uint32(n)
+	}
+}
+
+// WithPinnedWorkers enables CPU pinning for workers.
+func WithPinnedWorkers(enabled bool) Option {
+	return func(o *Options) {
+		o.PinWorkers = enabled
+	}
+}
+
+// WithPinnedWorkers enables CPU pinning for workers.
+func WithPinnedQT(qt QueueType) Option {
+	return func(o *Options) {
+		o.QT = qt
+	}
 }
 
 // FillDefaults replaces zero-value fields with default settings.

@@ -15,12 +15,8 @@ var queueTypes = []wp.QueueType{
 }
 
 func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int, *wp.NoopMetrics] {
-	opts := wp.Options{
-		Workers:    workers,
-		QT:         qt,
-	}
 	m := &wp.NoopMetrics{}
-	return wp.NewPool[int](opts, m)
+	return wp.NewPool[*wp.NoopMetrics,int](m,wp.WithWorkers(workers), wp.WithPinnedQT(qt))
 }
 
 //TODO: add more checks

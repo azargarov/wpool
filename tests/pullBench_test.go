@@ -25,7 +25,7 @@ func startPprof() {
 func getPool(opt wp.Options)* wp.Pool[int, *wp.NoopMetrics]{
 
     m := &wp.NoopMetrics{}
-    return wp.NewPool[int](opt, m)
+    return wp.NewPoolFromOptions[*wp.NoopMetrics, int](m, opt)
 }
 
 func BenchmarkMyPool_MixedReal(b *testing.B) {

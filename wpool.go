@@ -48,7 +48,17 @@ func (p *Pool[T, M]) GetIdleLen() int64 {
 	return int64(len(p.idleWorkers))
 }
 
-func NewPool[T any, M MetricsPolicy](opts Options, metrics M) *Pool[T, M] {
+func NewPool[M MetricsPolicy, T any](metrics M, opts ...Option) *Pool[T, M] {
+	o := Options{}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	o.FillDefaults()
+
+	return NewPoolFromOptions[M, T](metrics, o)
+}
+
+func NewPoolFromOptions[M MetricsPolicy, T any ](metrics M, opts Options) *Pool[T, M] {
 	opts.FillDefaults()
 
 	p := &Pool[T, M]{
