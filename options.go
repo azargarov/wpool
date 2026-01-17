@@ -21,7 +21,6 @@ const (
 	SegmentedQueue QueueType = iota
 )
 
-
 // Options configure the behavior of a worker Pool.
 //
 // Any zero-value fields are replaced with sensible defaults
@@ -35,9 +34,9 @@ type Options struct {
 	// SegmentSize is the number of jobs stored in a single queue segment.
 	//
 	// Larger values reduce segment churn but increase batch scan cost.
-	SegmentSize  int
-	
-		// SegmentCount is the number of queue segments preallocated on startup.
+	SegmentSize int
+
+	// SegmentCount is the number of queue segments preallocated on startup.
 	//
 	// Increasing this value reduces allocations under load at the cost
 	// of higher baseline memory usage.

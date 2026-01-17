@@ -1,7 +1,7 @@
 package workerpool
 
 import (
-	"golang.org/x/sys/cpu"
+	//"golang.org/x/sys/cpu"
 	"runtime"
 	"sync/atomic"
 )
@@ -22,18 +22,25 @@ const (
 // allocation cost under parallel producers.
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
 
+type slot[T any] struct {
+	ready uint32
+	job   Job[T]
+}
+
 type segment[T any] struct {
 	head    uint32
-	_       cpu.CacheLinePad
+	//_       cpu.CacheLinePad
 	tail    uint32
-	_       cpu.CacheLinePad
+	//_       cpu.CacheLinePad
 	reserve uint32
-	_       cpu.CacheLinePad
+	//_       cpu.CacheLinePad
 	next    atomic.Pointer[segment[T]]
-	_       cpu.CacheLinePad
-	
-	buf   []Job[T]
+	//_       cpu.CacheLinePad
 	ready []uint32
+	//_       cpu.CacheLinePad
+
+	//slots []slot[T]
+	buf   []Job[T]
 }
 
 // segmentedQ is a lock-free, append-only segmented queue.
@@ -45,10 +52,10 @@ type segment[T any] struct {
 // Segments are never reused once fully consumed.
 type segmentedQ[T any] struct {
 	// head points to the segment currently being consumed.
-	head     atomic.Pointer[segment[T]]
+	head atomic.Pointer[segment[T]]
 
-	// tail points to the segment currently being appended to.	
-	tail     atomic.Pointer[segment[T]]
+	// tail points to the segment currently being appended to.
+	tail atomic.Pointer[segment[T]]
 
 	// pageSize is the fixed capacity of each segment.
 	pageSize uint32
@@ -179,5 +186,4 @@ func (q *segmentedQ[T]) BatchPop() ([]Job[T], bool) {
 }
 
 // Len should returns an approximate number of jobs in the queue.
-//
 func (q *segmentedQ[T]) Len() int { return 0 }

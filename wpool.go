@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	defaultPushBatch       = 512
-	batchTimerInterval 	   = 50 * time.Microsecond
+	defaultPushBatch   = 512
+	batchTimerInterval = 50 * time.Microsecond
 )
 
 type JobFunc[T any] func(T) error
@@ -58,7 +58,7 @@ func NewPool[M MetricsPolicy, T any](metrics M, opts ...Option) *Pool[T, M] {
 	return NewPoolFromOptions[M, T](metrics, o)
 }
 
-func NewPoolFromOptions[M MetricsPolicy, T any ](metrics M, opts Options) *Pool[T, M] {
+func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T, M] {
 	opts.FillDefaults()
 
 	p := &Pool[T, M]{

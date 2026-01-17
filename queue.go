@@ -15,8 +15,7 @@
 // the scheduler or worker logic, as long as they implement schedQueue.
 package workerpool
 
-import (
-)
+import ()
 
 
 type schedQueue[T any] interface {
