@@ -92,11 +92,11 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 		p.shutdown.Store(true)
 		close(p.doneCh)
 
-		for _, w := range p.wakes {
-			if w != nil {
-				close(w)
-			}
-		}
+		//for _, w := range p.wakes {
+		//	if w != nil {
+		//		close(w)
+		//	}
+		//}
 	})
 
 	for {
@@ -110,6 +110,26 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 			runtime.Gosched()
 		}
 	}
+}
+
+func (p *Pool[T, M]) Shutdown_(ctx context.Context) error {
+    p.stopOnce.Do(func() {
+        p.shutdown.Store(true)
+    })
+
+
+    for {
+        if p.ActiveWorkers() == 0 {
+            close(p.doneCh) 
+            return nil
+        }
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        default:
+            runtime.Gosched()
+        }
+    }
 }
 
 func (p *Pool[T, M]) Stop() { _ = p.Shutdown(context.Background()) }
@@ -145,7 +165,7 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 		select {
 		case w := <-p.idleWorkers:
 			w <- struct{}{}
-			p.lastDrainNano.Store(time.Now().UnixNano()) // 👈 reset signal
+			p.lastDrainNano.Store(time.Now().UnixNano()) 
 		default:
 			p.batchInFlight.Store(false)
 		}
@@ -154,19 +174,42 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 }
 
 func (p *Pool[T, M]) batchWorker(id int) {
+
+	defer func() {
+        p.batchInFlight.Store(false) 
+        p.SetWorkerState(id, false)
+    }()
+
 	if p.opts.PinWorkers {
-		PinToCPU(id % runtime.NumCPU())
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		if err := PinToCPU(id % runtime.NumCPU()); err != nil {
+			// TODO: log or panic 
+		}
 	}
-	defer p.SetWorkerState(id, false)
 
 	wake := p.wakes[id]
-	p.idleWorkers <- wake
+
+	// initial publish
+    select {
+    case p.idleWorkers <- wake:
+    case <-p.doneCh:
+        return
+    }
 
 	for {
-		_, ok := <-wake
-		if !ok || p.shutdown.Load() {
-			return
-		}
+		select {
+    	case <-wake:
+    	case <-p.doneCh:
+				p.batchInFlight.Store(false)
+        		return
+    	}
+
+    	if p.shutdown.Load() {
+			p.batchInFlight.Store(false)
+    	    return
+    	}
 
 		deQueued := p.batchProcessJob()
 		p.metrics.BatchDecQueued(deQueued)
@@ -180,13 +223,20 @@ func (p *Pool[T, M]) batchWorker(id int) {
 		if p.shutdown.Load() {
 			return
 		}
-		p.idleWorkers <- wake
+        select {
+        case p.idleWorkers <- wake:
+        case <-p.doneCh:
+            return
+        default:
+			//TODO: timer/submit can still find other workers but if handle it might reduce wake efficiency
+        }
 	}
 }
 
 func (p *Pool[T, M]) batchTimer() {
 	t := time.NewTicker(batchTimerInterval)
 	defer t.Stop()
+	//defer p.batchInFlight.Store(false)
 
 	for {
 		select {
@@ -213,6 +263,7 @@ func (p *Pool[T, M]) batchTimer() {
 		}
 	}
 }
+
 
 // Metrics returns a copy of the current metrics snapshot.
 func (p *Pool[T, M]) Metrics() *M {

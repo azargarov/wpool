@@ -1,7 +1,6 @@
 package workerpool
 
 import (
-	"runtime"
 )
 
 func (p *Pool[T, M]) runBatch(jobs []Job[T]) {
@@ -25,23 +24,17 @@ func (p *Pool[T, M]) runJob(j Job[T]) {
 }
 
 func (p *Pool[T, M]) batchProcessJob() int64 {
-	var counter int64
-	emptySpins := 0
+    var counter int64
 
-	for {
-		jobs, ok := p.queue.BatchPop()
-		if ok {
-			//emptySpins = 0
-			p.runBatch(jobs)
-			counter += int64(len(jobs))
-			continue
-		}
-
-		if p.pendingJobs.Load() > 0 && emptySpins < 50 {
-			emptySpins++
-			runtime.Gosched()
-			continue
-		}
-		return counter
-	}
+    for {
+        batch, ok := p.queue.BatchPop()
+        if ok {
+            p.runBatch(batch.Jobs)
+            counter += int64(len(batch.Jobs))
+            p.queue.OnBatchDone(batch)
+            continue
+        }
+        return counter
+    }
 }
+

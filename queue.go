@@ -17,6 +17,11 @@ package workerpool
 
 import ()
 
+type Batch[T any] struct {
+	Jobs 	[]Job[T]
+	Seg  	*segment[T]
+	End  	uint32 
+}
 
 type schedQueue[T any] interface {
 	// Push appends a job to the queue.
@@ -29,11 +34,15 @@ type schedQueue[T any] interface {
 	//
 	// The returned slice must be treated as read-only.
 	// The boolean result reports whether any jobs were returned.
-	BatchPop() ([]Job[T], bool)
+	BatchPop() (Batch[T], bool) //([]Job[T], bool)
 
 	// Len returns the number of jobs currently enqueued.
 	//
 	// Implementations may return an approximate value.
+
+	OnBatchDone(b Batch[T])
+	MaybeHasWork() bool 
+
 	Len() int
 }
 
