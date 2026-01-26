@@ -9,24 +9,32 @@ import (
 
 const (
 	DefaultSegmentSize = 4096
-	defaultSegmentPoolSize = 256
+	defaultSegmentPoolSize = 128
 )
 
 
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
 
-type segment[T any] struct {
-	head    uint32
+type segHot struct {
+	head uint32
+	_    [60]byte
+
 	tail    uint32
 	reserve uint32
-	next    atomic.Pointer[segment[T]]
-	ready []uint32
+	_       [56]byte
+}
+
+type segment[T any] struct {
+	hot segHot
+
+	next  atomic.Pointer[segment[T]] 
+	ready []uint32                   
 
 	inflight atomic.Int32
 	detached atomic.Uint32
-	refs atomic.Int32
+	refs     atomic.Int32
 
-	buf   []Job[T]
+	buf []Job[T]
 }
 
 type segmentedQ[T any] struct {
@@ -111,11 +119,11 @@ func (q *segmentedQ[T]) Push(v Job[T]) bool {
 
 		// reserve slot
 		for {
-			r := atomic.LoadUint32(&seg.reserve)
+			r := atomic.LoadUint32(&seg.hot.reserve)
 			if r >= q.pageSize {
 				break
 			}
-			if atomic.CompareAndSwapUint32(&seg.reserve, r, r+1) {
+			if atomic.CompareAndSwapUint32(&seg.hot.reserve, r, r+1) {
 				seg.buf[r] = v
 				atomic.StoreUint32(&seg.ready[r], 1)
 				seg.refs.Add(-1)
@@ -153,8 +161,8 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 			panic("nil segment")
 		}
 
-		h := atomic.LoadUint32(&seg.head)
-		r := atomic.LoadUint32(&seg.reserve)
+		h := atomic.LoadUint32(&seg.hot.head)
+		r := atomic.LoadUint32(&seg.hot.reserve)
 		if h == q.pageSize && r == q.pageSize {
 			next := seg.next.Load()
 			if next == nil {
@@ -173,7 +181,7 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 			continue
 		}
 
-		r = atomic.LoadUint32(&seg.reserve)
+		r = atomic.LoadUint32(&seg.hot.reserve)
 		limit := min(r, q.pageSize)
 
 		end := h
@@ -181,7 +189,7 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 			end++
 		}
 		if end > h {
-			if atomic.CompareAndSwapUint32(&seg.head, h, end) {
+			if atomic.CompareAndSwapUint32(&seg.hot.head, h, end) {
 				seg.inflight.Add(1)
 				seg.refs.Add(-1)
 				return Batch[T]{
@@ -220,9 +228,9 @@ func (q *segmentedQ[T]) tryRecycle(seg *segment[T]) {
     if q.tail.Load() == seg { return }
 
 
-	atomic.StoreUint32(&seg.head, 0)
-	atomic.StoreUint32(&seg.reserve, 0)
-	atomic.StoreUint32(&seg.tail, 0)
+	atomic.StoreUint32(&seg.hot.head, 0)
+	atomic.StoreUint32(&seg.hot.reserve, 0)
+	atomic.StoreUint32(&seg.hot.tail, 0)
     seg.detached.Store(0)
     seg.inflight.Store(0)
     seg.next.Store(nil)
@@ -237,7 +245,7 @@ func (q *segmentedQ[T]) Len() int { return 0 }
 func (q *segmentedQ[T]) MaybeHasWork() bool {
 	seg := q.head.Load()
 	if seg == nil { return false }
-	h := atomic.LoadUint32(&seg.head)
-	r := atomic.LoadUint32(&seg.reserve)
+	h := atomic.LoadUint32(&seg.hot.head)
+	r := atomic.LoadUint32(&seg.hot.reserve)
 	return r > h || seg.next.Load() != nil
 }
