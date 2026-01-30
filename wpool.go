@@ -38,9 +38,9 @@ type Pool[T any, M MetricsPolicy] struct {
 	idleWorkers   chan WakeupWorker
 	workersActive []atomic.Bool
 
-	pendingJobs   atomic.Int64 // scheduling counter, not metrics
-	batchInFlight atomic.Bool  // only one wake trigger at a time
-	lastDrainNano atomic.Int64 // for timer (optional but recommended)
+	pendingJobs   atomic.Int64 
+	batchInFlight atomic.Bool  
+	lastDrainNano atomic.Int64 
 
 }
 
@@ -92,11 +92,6 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 		p.shutdown.Store(true)
 		close(p.doneCh)
 
-		//for _, w := range p.wakes {
-		//	if w != nil {
-		//		close(w)
-		//	}
-		//}
 	})
 
 	for {
@@ -285,4 +280,8 @@ func (p *Pool[T, M]) ActiveWorkers() int {
 		}
 	}
 	return count
+}
+
+func (p *Pool[T, M])GetQeueu()schedQueue[T]{
+	return p.queue
 }

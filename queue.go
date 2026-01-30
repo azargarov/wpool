@@ -53,10 +53,10 @@ type schedQueue[T any] interface {
 func (p *Pool[T, M]) makeQueue() schedQueue[T] {
 	switch p.opts.QT {
 	case SegmentedQueue:
-		return NewSegmentedQ[T](uint32(p.opts.SegmentSize), p.opts.SegmentCount)
+		return NewSegmentedQ[T](p.opts)
 
 	default:
-		return NewSegmentedQ[T](DefaultSegmentSize, DefaultSegmentCount)
+		return NewSegmentedQ[T](p.opts)
 
 	}
 }

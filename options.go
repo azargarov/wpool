@@ -34,13 +34,15 @@ type Options struct {
 	// SegmentSize is the number of jobs stored in a single queue segment.
 	//
 	// Larger values reduce segment churn but increase batch scan cost.
-	SegmentSize int
+	SegmentSize uint32
 
 	// SegmentCount is the number of queue segments preallocated on startup.
 	//
 	// Increasing this value reduces allocations under load at the cost
 	// of higher baseline memory usage.
 	SegmentCount uint32
+
+	PoolCapacity   uint32
 
 	// QT selects the scheduler queue implementation.
 	QT QueueType
@@ -60,7 +62,7 @@ func WithWorkers(n int) Option {
 }
 
 // WithSegmentSize sets the queue segment size.
-func WithSegmentSize(n int) Option {
+func WithSegmentSize(n uint32) Option {
 	return func(o *Options) {
 		o.SegmentSize = n
 	}
