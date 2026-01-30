@@ -41,7 +41,7 @@ type segment[T any] struct {
 	refs     atomic.Int32
 	_    [60]byte
 	buf []Job[T]
-	ready []uint32       
+	ready []atomic.Uint32
 	next  atomic.Pointer[segment[T]] 
 }
 
@@ -60,7 +60,7 @@ type segmentedQ[T any] struct {
 func mkSegment[T any](segSize uint32) *segment[T] {
 	seg :=segment[T]{
 		buf:   make([]Job[T], segSize),
-		ready: make([]uint32, segSize),
+		ready: make([]atomic.Uint32, segSize),
 	}
 	seg.gen.Store(1)
 	//allocated.Add(1)
@@ -76,7 +76,7 @@ type segmentPool[T any] struct {
 func (p *segmentPool[T]) Put(seg *segment[T]) {
     p.mu.Lock()
     max := int(p.maxKeep)
-    if max <= 0 { max = cap(p.free) } // дефолт
+    if max <= 0 { max = cap(p.free) }
     if len(p.free) < max {
         p.free = append(p.free, seg)
     }
@@ -148,7 +148,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) bool {
 
 			if atomic.CompareAndSwapUint32(&seg.hot.reserve, r, r + 1) {
 				seg.buf[r] = v
-				atomic.StoreUint32(&seg.ready[r], g) 
+				seg.ready[r].Store(g) 
 				seg.refs.Add(-1)
 				return true
 			}
@@ -191,7 +191,7 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 
 		end := h
 		g := seg.gen.Load()
-		for end < limit && atomic.LoadUint32(&seg.ready[end]) == g {
+		for end < limit && seg.ready[end].Load() == g{ 
 			end++
 		}
 
