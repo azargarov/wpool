@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	defaultPushBatch   = 512
+	defaultPushBatch   = 64
 	batchTimerInterval = 50 * time.Microsecond
 )
 
@@ -107,26 +107,6 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (p *Pool[T, M]) Shutdown_(ctx context.Context) error {
-    p.stopOnce.Do(func() {
-        p.shutdown.Store(true)
-    })
-
-
-    for {
-        if p.ActiveWorkers() == 0 {
-            close(p.doneCh) 
-            return nil
-        }
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        default:
-            runtime.Gosched()
-        }
-    }
-}
-
 func (p *Pool[T, M]) Stop() { _ = p.Shutdown(context.Background()) }
 
 func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
@@ -205,7 +185,6 @@ func (p *Pool[T, M]) batchWorker(id int) {
 			p.batchInFlight.Store(false)
     	    return
     	}
-
 		deQueued := p.batchProcessJob()
 		p.metrics.BatchDecQueued(deQueued)
 		new := p.pendingJobs.Add(-int64(deQueued))
