@@ -1,7 +1,12 @@
 package workerpool
 
 import (
+	"context"
+	"errors"
+    "fmt"
 )
+
+var ErrPoolPanic   = errors.New("workerpool: job panic. ")
 
 func (p *Pool[T, M]) runBatch(jobs []Job[T]) {
 	for _, j := range jobs {
@@ -9,18 +14,38 @@ func (p *Pool[T, M]) runBatch(jobs []Job[T]) {
 	}
 }
 
-func (p *Pool[T, M]) runJob(j Job[T]) {
+func (p *Pool[T, M]) runJob(j Job[T]) (err error) {
+
+    if j.Ctx == nil {
+		j.Ctx = context.Background()
+	}
+
+    if j.CleanupFunc != nil{
+	    defer func() {
+			defer func() { _ = recover() }()
+            j.CleanupFunc()
+            }()
+    }
+
+    defer p.metrics.IncExecuted()
+
+	select {
+	case <-j.Ctx.Done():
+		return j.Ctx.Err()
+	default:
+	}
+
+	if j.Fn == nil {
+		return ErrNilFunc
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
-			//  TODO:  panic handler
+			err = errors.Join(ErrPoolPanic, fmt.Errorf("panic: %v",r))
 		}
-		if j.CleanupFunc != nil {
-			j.CleanupFunc()
-		}
-		p.metrics.IncExecuted()
 	}()
-	// TODO: do not drop error
-	_ = j.Fn(j.Payload)
+
+    return j.Fn(j.Payload)
 }
 
 func (p *Pool[T, M]) batchProcessJob() int64 {

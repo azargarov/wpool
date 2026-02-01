@@ -3,7 +3,6 @@ package workerpool
 import (
 	"context"
 	"errors"
-	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,12 @@ import (
 const (
 	defaultPushBatch   = 64
 	batchTimerInterval = 50 * time.Microsecond
+)
+
+var (
+	ErrClosed    = errors.New("workerpool: pool is closed")
+	ErrQueueFull = errors.New("workerpool: queue is full")
+	ErrNilFunc   = errors.New("workerpool: job func is nil")
 )
 
 type JobFunc[T any] func(T) error
@@ -91,7 +96,6 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 	p.stopOnce.Do(func() {
 		p.shutdown.Store(true)
 		close(p.doneCh)
-
 	})
 
 	for {
@@ -115,7 +119,7 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 	}
 
 	if p.shutdown.Load() {
-		return fmt.Errorf("workerpool: pool closed")
+		return ErrClosed
 	}
 
 	select {
@@ -126,7 +130,7 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 
 	ok := p.queue.Push(job)
 	if !ok {
-		return errors.New("queue is full")
+		return ErrQueueFull
 	}
 	p.metrics.IncQueued()
 
