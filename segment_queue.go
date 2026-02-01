@@ -4,45 +4,47 @@ import (
 	"runtime"
 	"sync/atomic"
 	"sync"
+	"golang.org/x/sys/cpu"
 )
 
+type cachePad = cpu.CacheLinePad
 
 const (
 	DefaultSegmentSize = 4096
-	defaultSegmentPoolSize = 2048
+	//defaultSegmentPoolSize = 2048
 )
-
-var allocated, recycled, consumed atomic.Int64
-
-func PrintStat(){
-	println("allocated, recycled, consumed", allocated.Load(), recycled.Load(), consumed.Load())
-}
 
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
 
-type segHot struct {
-	head uint32
-	_    [60]byte
+type producerView struct{
 	tail    uint32
-	_    [60]byte
 	reserve uint32
-	_    [60]byte
+	_       cachePad
+}
+
+type consumerView struct{
+	head uint32
+	_    cachePad
 }
 
 type segment[T any] struct {
-	hot segHot
-	_    [60]byte
-	gen   atomic.Uint32
-	_    [60]byte
-	inflight atomic.Int32
-	_    [60]byte
-	detached atomic.Uint32
-	_    [60]byte
-	refs     atomic.Int32
-	_    [60]byte
-	buf []Job[T]
-	ready []atomic.Uint32
-	next  atomic.Pointer[segment[T]] 
+	//hot 		segHot
+	producer 	producerView
+	consumer 	consumerView
+
+	inflight 	atomic.Int32
+	gen   		atomic.Uint32
+
+	detached 	atomic.Uint32
+	_    		cachePad 
+
+	refs     	atomic.Int32
+	_    		cachePad 
+
+	buf 		[]Job[T]
+	ready 		[]uint32
+	_ 			cachePad
+	next  		atomic.Pointer[segment[T]] 
 }
 
 type segmentedQ[T any] struct {
@@ -54,16 +56,15 @@ type segmentedQ[T any] struct {
 	
 	pageSize uint32
 
-	mu sync.Mutex
 }
 
 func mkSegment[T any](segSize uint32) *segment[T] {
 	seg :=segment[T]{
 		buf:   make([]Job[T], segSize),
-		ready: make([]atomic.Uint32, segSize),
+		ready: make([]uint32, segSize),
 	}
 	seg.gen.Store(1)
-	//allocated.Add(1)
+	statAllocated()
 	return &seg
 }
 
@@ -81,7 +82,7 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
         p.free = append(p.free, seg)
     }
     p.mu.Unlock()
-	//recycled.Add(1)
+	statRecycled()
 }
 
 func (p *segmentPool[T]) Get(pageSize uint32) *segment[T] {
@@ -95,7 +96,7 @@ func (p *segmentPool[T]) Get(pageSize uint32) *segment[T] {
     p.free[n-1] = nil 
     p.free = p.free[:n-1]
     p.mu.Unlock()
-	//consumed.Add(1)
+	statConsumed()
     return seg
 }
 
@@ -112,18 +113,16 @@ func NewSegmentedQ[T any](opts Options ) *segmentedQ[T]{
 	}
 
 	first := q.pool.Get(opts.SegmentSize)
-	atomic.StoreUint32(&first.hot.head, 0)
-	atomic.StoreUint32(&first.hot.reserve, 0)
+	atomic.StoreUint32(&first.consumer.head, 0)
+	atomic.StoreUint32(&first.producer.reserve, 0)
 	first.next.Store(nil)
 	first.detached.Store(0)
 	first.inflight.Store(0)
 
 	q.head.Store(first)
 	q.tail.Store(first)
-	allocated.Store(0)
 	return q
 }
-
 
 func (q *segmentedQ[T]) Push(v Job[T]) bool {
 	for {
@@ -141,17 +140,18 @@ func (q *segmentedQ[T]) Push(v Job[T]) bool {
 		}
 
 		for {
-			r := atomic.LoadUint32(&seg.hot.reserve)
+			r := atomic.LoadUint32(&seg.producer.reserve)
 			if r >= q.pageSize {
 				break
 			}
-
-			if atomic.CompareAndSwapUint32(&seg.hot.reserve, r, r + 1) {
+			//statCASAttempt()
+			if atomic.CompareAndSwapUint32(&seg.producer.reserve, r, r + 1) {
 				seg.buf[r] = v
-				seg.ready[r].Store(g) 
+				atomic.StoreUint32(&seg.ready[r],g) 
 				seg.refs.Add(-1)
 				return true
 			}
+			statCASMiss()
 		}
 
 		next := seg.next.Load()
@@ -185,18 +185,18 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 			continue
 		}
 
-		h := atomic.LoadUint32(&seg.hot.head)
-		r := atomic.LoadUint32(&seg.hot.reserve)
+		h := atomic.LoadUint32(&seg.consumer.head)
+		r := atomic.LoadUint32(&seg.producer.reserve)
 		limit := min(r, q.pageSize)
 
 		end := h
 		g := seg.gen.Load()
-		for end < limit && seg.ready[end].Load() == g{ 
+		for end < limit && atomic.LoadUint32(&seg.ready[end]) == g{ 
 			end++
 		}
 
 		if end > h {
-			if atomic.CompareAndSwapUint32(&seg.hot.head, h, end) {
+			if atomic.CompareAndSwapUint32(&seg.consumer.head, h, end) {
 				seg.inflight.Add(1)
 				seg.refs.Add(-1)
 				return Batch[T]{Jobs: seg.buf[h:end], Seg: seg, End: end}, true
@@ -256,9 +256,8 @@ func (q *segmentedQ[T]) tryRecycle(seg *segment[T]) {
 	if q.head.Load() == seg { return }
 	if q.tail.Load() == seg { return }
 
-	atomic.StoreUint32(&seg.hot.head, 0)
-	atomic.StoreUint32(&seg.hot.reserve, 0)
-	atomic.StoreUint32(&seg.hot.tail, 0)
+	atomic.StoreUint32(&seg.consumer.head, 0)
+	atomic.StoreUint32(&seg.producer.reserve, 0)
 
 	seg.next.Store(nil)
 	seg.inflight.Store(0)
@@ -279,7 +278,7 @@ func (q *segmentedQ[T]) Len() int { return 0 }
 func (q *segmentedQ[T]) MaybeHasWork() bool {
 	seg := q.head.Load()
 	if seg == nil { return false }
-	h := atomic.LoadUint32(&seg.hot.head)
-	r := atomic.LoadUint32(&seg.hot.reserve)
+	h := atomic.LoadUint32(&seg.consumer.head)
+	r := atomic.LoadUint32(&seg.producer.reserve)
 	return r > h || seg.next.Load() != nil
 }
