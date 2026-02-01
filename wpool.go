@@ -47,6 +47,8 @@ type Pool[T any, M MetricsPolicy] struct {
 	batchInFlight atomic.Bool  
 	lastDrainNano atomic.Int64 
 
+	wgWorkers   sync.WaitGroup
+	workersDone chan struct{}
 }
 
 func (p *Pool[T, M]) GetIdleLen() int64 {
@@ -81,10 +83,17 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 
 	for i := 0; i < opts.Workers; i++ {
 		go func(id int) {
-			p.batchWorker(id)
+			p.batchWorker(id,&p.wgWorkers)
 		}(i)
+		p.wgWorkers.Add(1)
 		p.SetWorkerState(i, true)
 	}
+
+	p.workersDone = make(chan struct{})
+	go func() {
+		p.wgWorkers.Wait()
+		close(p.workersDone)
+	}()
 
 	p.lastDrainNano.Store(time.Now().UnixNano())
 	go p.batchTimer()
@@ -98,16 +107,11 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 		close(p.doneCh)
 	})
 
-	for {
-		if p.ActiveWorkers() == 0 {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			runtime.Gosched()
-		}
+	select {
+	case <-p.workersDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -152,11 +156,12 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 	return nil
 }
 
-func (p *Pool[T, M]) batchWorker(id int) {
+func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
 
 	defer func() {
         p.batchInFlight.Store(false) 
         p.SetWorkerState(id, false)
+		wg.Done()
     }()
 
 	if p.opts.PinWorkers {
