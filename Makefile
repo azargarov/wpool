@@ -16,7 +16,7 @@ lint:
 	golangci-lint run $(PKG)
 
 test:
-	go test $(PKG)
+	go test $(TEST_PKG) -v
 
 
 bench:
