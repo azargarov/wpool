@@ -28,7 +28,6 @@ type consumerView struct{
 }
 
 type segment[T any] struct {
-	//hot 		segHot
 	producer 	producerView
 	consumer 	consumerView
 
