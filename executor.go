@@ -10,7 +10,9 @@ var ErrPoolPanic   = errors.New("workerpool: job panic. ")
 
 func (p *Pool[T, M]) runBatch(jobs []Job[T]) {
 	for _, j := range jobs {
-		p.runJob(j)
+        if err := p.runJob(j); err != nil {
+            p.reportJobError(err)
+        }
 	}
 }
 

@@ -21,6 +21,7 @@ var (
 )
 
 type JobFunc[T any] func(T) error
+type ErrorHandler  	func(e error)
 
 type WakeupWorker chan struct{}
 
@@ -32,23 +33,26 @@ type Job[T any] struct {
 }
 
 type Pool[T any, M MetricsPolicy] struct {
-	stopOnce      sync.Once
-	opts          Options
-	shutdown      atomic.Bool
-	doneCh        chan struct{}
-	metricsMu     sync.Mutex
-	metrics       M
-	queue         schedQueue[T]
-	wakes         []WakeupWorker
-	idleWorkers   chan WakeupWorker
-	workersActive []atomic.Bool
+	stopOnce      	sync.Once
+	opts          	Options
+	shutdown      	atomic.Bool
+	doneCh        	chan struct{}
+	metricsMu     	sync.Mutex
+	metrics       	M
+	queue         	schedQueue[T]
+	wakes         	[]WakeupWorker
+	idleWorkers   	chan WakeupWorker
+	workersActive 	[]atomic.Bool
 
-	pendingJobs   atomic.Int64 
-	batchInFlight atomic.Bool  
-	lastDrainNano atomic.Int64 
+	pendingJobs   	atomic.Int64 
+	batchInFlight 	atomic.Bool  
+	lastDrainNano 	atomic.Int64 
 
-	wgWorkers   sync.WaitGroup
-	workersDone chan struct{}
+	wgWorkers   	sync.WaitGroup
+	workersDone 	chan struct{}
+
+	OnInternaError  ErrorHandler
+	OnJobError		ErrorHandler
 }
 
 func (p *Pool[T, M]) GetIdleLen() int64 {
@@ -118,12 +122,16 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 func (p *Pool[T, M]) Stop() { _ = p.Shutdown(context.Background()) }
 
 func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
-	if job.Ctx == nil {
-		job.Ctx = context.Background()
-	}
-
 	if p.shutdown.Load() {
 		return ErrClosed
+	}
+
+	if job.Fn == nil {
+	    return ErrNilFunc
+	}
+
+	if job.Ctx == nil {
+		job.Ctx = context.Background()
 	}
 
 	select {
@@ -169,7 +177,7 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
 		defer runtime.UnlockOSThread()
 
 		if err := PinToCPU(id % runtime.NumCPU()); err != nil {
-			// TODO: log or panic 
+			p.reportInternalError(err) 
 		}
 	}
 
