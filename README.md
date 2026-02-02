@@ -1,201 +1,240 @@
-# workerpool — High-Performance Queues, Priority, Aging & Retries for Go
+# workerpool — High-Performance Batch Worker Pool for Go
 
-A **bounded-concurrency** worker pool for Go with:
+`workerpool` is a **high-throughput, bounded-concurrency worker pool** for Go, built around a **lock-free segmented FIFO queue** and **batch-based scheduling**.
 
-- **Multiple schedulers**: FIFO, Priority, Conditional, BucketQueue  
-- **Aging** (old jobs bubble up automatically)  
-- **Per-job retries** with context-aware backoff  
-- **Panic-safe workers** and per-job cleanup  
-- **Graceful shutdown** with deadlines  
-- **High-resolution metrics** (submitted, executed, active workers, max age)  
-- **Ultra-fast bucket-based priority queue** (v0.3.0)
+It is designed for workloads where:
+- job execution is cheap,
+- submission rate is high,
+- contention must be minimized,
+- memory allocation must be predictable.
 
-Module: `github.com/azargarov/go-utils/wpool`
+This is **not** a generic “feature-heavy” pool — it is a **low-level execution engine** optimized for performance and scalability.
 
----
+Module:
 
-## Install
-
-```bash
-go get github.com/azargarov/go-utils/wpool@v0.3.0
+```
+github.com/azargarov/go-utils/wpool
 ```
 
 ---
 
-## Quick start
+## Core Design
+
+At its core, `workerpool` combines:
+
+- A **lock-free segmented queue** (MPMC)
+- **Batch draining** instead of per-job wakeups
+- **Bounded concurrency** with a fixed worker set
+- **Minimal synchronization** between producers and consumers
+- **Explicit memory reuse** via a segment pool
+
+The queue is optimized to keep producers and consumers mostly independent, reducing cache-line contention and CAS pressure.
+
+---
+
+## Features
+
+- **Bounded concurrency**
+  - Fixed number of worker goroutines
+  - No unbounded goroutine spawning
+- **Lock-free segmented FIFO queue**
+  - Multiple producers
+  - Batch-based consumption
+- **Batch scheduling**
+  - Workers process jobs in batches for cache efficiency
+  - Reduces wakeups and atomic traffic
+- **Explicit memory reuse**
+  - Preallocated queue segments
+  - Segment recycling with generation counters
+- **Context-aware jobs**
+  - Submission respects `context.Context`
+- **Panic-safe execution**
+  - Workers are isolated from job panics
+- **Graceful shutdown**
+  - Deadline-aware draining
+- **Low-overhead metrics hook**
+  - Metrics policy is injected, not hardcoded
+- **Optional CPU pinning**
+  - Improves cache locality on NUMA / high-core systems
+
+---
+
+## Installation
+
+```bash
+go get github.com/azargarov/go-utils/wpool
+```
+
+---
+
+## Quick Start
 
 ```go
 package main
 
 import (
-    "context"
-    "fmt"
-    "time"
+	"context"
+	"fmt"
 
-    wp "github.com/azargarov/go-utils/wpool"
+	wp "github.com/azargarov/go-utils/wpool"
 )
 
 func main() {
-    opts := wp.Options{
-        Workers:    4,
-        AgingRate:  0.3,
-        RebuildDur: 200 * time.Millisecond,
-        QueueSize:  256,
-        QT:         wp.Priority,
-    }
+	pool := wp.NewPool(
+		wp.NoopMetrics{},
+		wp.WithWorkers(4),
+		wp.WithSegmentSize(4096),
+		wp.WithSegmentCount(64),
+	)
 
-    pool := wp.NewPool[int](opts, wp.RetryPolicy{
-        Attempts: 3,
-        Initial:  200 * time.Millisecond,
-        Max:      5 * time.Second,
-    })
-    defer pool.Stop()
+	defer pool.Stop()
 
-    jobCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-    defer cancel()
-
-    if err := pool.Submit(wp.Job[int]{
-        Payload: 42,
-        Ctx:     jobCtx,
-        Fn: func(n int) error {
-            fmt.Println("processing", n)
-            return nil
-        },
-    }, 10); err != nil {
-        panic(err)
-    }
+	_ = pool.Submit(wp.Job[int]{
+		Payload: 42,
+		Ctx:     context.Background(),
+		Fn: func(n int) error {
+			fmt.Println("processing", n)
+			return nil
+		},
+	}, 0)
 }
 ```
 
 ---
 
-## Queue Types (v0.3.0)
-
-`Options.QT` lets you choose between several scheduling strategies:
-
-| Queue Type     | Behavior | Use Case |
-|----------------|----------|----------|
-| **Fifo**       | First-in–first-out | Best latency, predictable ordering |
-| **Priority**   | Aging + max-heap | Mixed workloads where fairness matters |
-| **BucketQueue**  | Fixed-range buckets with O(1) push/pop | High throughput |
-
----
-
-## Priority & Aging
-
-Each job has a **base priority**.  
-Scheduler computes:
-
-```
-effective = basePriority + agingRate * ageSeconds
-```
-
-Higher effective priority → runs sooner.  
-Low-priority jobs eventually rise — **no starvation**.
-
----
-
-## BucketQueue (v0.3.0)
-
-Bucket-based priority queue:
-
-- 61 buckets (prio 0–60)
-- Bitmap for bucket occupancy
-- `bits.LeadingZeros64` for instant highest-bucket lookup
-
----
-
-## Per-job Retry Override
+## Job Model
 
 ```go
-_ = pool.Submit(wp.Job[int]{
-    Payload: 1,
-    Ctx:     context.Background(),
-    Retry: &wp.RetryPolicy{Attempts: 5, Initial: 50 * time.Millisecond},
-    Fn: func(n int) error { return fmt.Errorf("fail") },
-}, 5)
+type Job[T any] struct {
+	Payload     T
+	Fn          func(T) error
+	Ctx         context.Context
+	CleanupFunc func()
+}
 ```
+
+- `Ctx` is checked before enqueueing
+- `CleanupFunc` is guaranteed to run after execution
+- Jobs are executed **in FIFO order**
+
+> Note: `basePrio` is currently unused and reserved for future schedulers.
 
 ---
 
-## Cancel During Backoff
+## Queue Implementation
 
-```go
-ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-defer cancel()
+### Segmented Queue
 
-_ = pool.Submit(wp.Job[int]{
-    Payload: 7,
-    Ctx:     ctx,
-    Fn: func(int) error { return fmt.Errorf("boom") },
-}, 10)
-```
+- Queue consists of linked **segments**
+- Each segment contains:
+  - job buffer
+  - readiness bitmap
+  - producer / consumer cursors
+- Producers append using CAS on a per-segment reserve index
+- Consumers drain **contiguous ready ranges** as batches
+
+Key properties:
+
+- No global locks
+- No per-job wakeups
+- Minimal false sharing
+- Segment reuse via generation counters (ABA-safe)
 
 ---
 
-## Graceful Shutdown
+## Batch Processing
+
+Workers wake up only when:
+- enough jobs are pending, or
+- a batch timer fires
+
+This allows:
+- amortized synchronization cost
+- better cache locality
+- predictable throughput under load
+
+---
+
+## Shutdown Semantics
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
 if err := pool.Shutdown(ctx); err != nil {
-    // deadline exceeded
+	// deadline exceeded
 }
 ```
+
+- Prevents new submissions
+- Drains queued work
+- Waits for workers to finish or deadline to expire
 
 ---
 
 ## Metrics
 
-```go
-m := pool.Metrics()
-fmt.Println("submitted:", m.Submitted())
-fmt.Println("executed:", m.Executed())
-fmt.Println("active workers:", pool.ActiveWorkers())
-fmt.Println("queue length:", pool.QueueLength())
-```
-
----
-
-## Benchmark Suite (v0.3.0)
-
-- FIFO / Priority / BucketQueue microbenchmarks  
-- Parallel submit scaling  
-- Multi-priority stress tests  
-- End-to-end latency  
-- Automatic summarization
-
-```bash
-go test -bench Benchmark -benchmem -run ^$
-```
-
----
-
-## API Overview
+Metrics are **policy-driven**:
 
 ```go
-type Options struct {
-    Workers    int
-    AgingRate  float64
-    RebuildDur time.Duration
-    QueueSize  int
-    QT         QueueType
+type MetricsPolicy interface {
+	IncQueued()
+	BatchDecQueued(n int)
 }
 ```
 
+This keeps the hot path free of unnecessary overhead.
+
 ---
 
-## What’s New in v0.3.0
+## Options
 
-- New **BucketQueue** with bitmap O(1) scheduling  
-- Benchmark suite overhaul  
-- Scheduler cleanup + fewer allocations  
-- Improved metrics  
+```go
+type Options struct {
+	Workers       int
+	SegmentSize   uint32
+	SegmentCount  uint32
+	PoolCapacity  uint32
+	QT            QueueType
+	PinWorkers    bool
+}
+```
+
+Defaults are applied automatically via `FillDefaults()`.
+
 ---
 
-## Related Packages
+## QueueType
 
-- `backoff` — retry helpers  
-- `zlog` — structured logging  
-- `grlimit` — goroutine throttler  
+Currently implemented:
+
+- **SegmentedQueue** — lock-free FIFO queue
+
+`QueueType` exists as an extension point. Other schedulers (bucketed, priority, aging) are **not yet wired in**.
+
+---
+
+## What This Is (and Isn’t)
+
+✅ This **is**:
+- a high-performance execution engine
+- suitable for internal systems, pipelines, schedulers
+- ideal when you care about ns/op and cache lines
+
+❌ This is **not**:
+- a feature-rich task framework
+- a priority scheduler (yet)
+- a general-purpose job system
+
+---
+
+## Roadmap (Explicitly Non-Promissory)
+
+Planned directions (not yet implemented):
+
+- Bucket-based priority scheduler
+- Aging via queue rotation
+- Adaptive segment provisioning
+- NUMA-aware worker placement
+
+These are **design directions**, not guarantees.
