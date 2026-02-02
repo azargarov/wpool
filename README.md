@@ -8,13 +8,37 @@ It is designed for workloads where:
 - contention must be minimized,
 - memory allocation must be predictable.
 
-This is **not** a generic “feature-heavy” pool — it is a **low-level execution engine** optimized for performance and scalability.
 
 Module:
 
 ```
 github.com/azargarov/go-utils/wpool
 ```
+
+## Performance at a Glance
+
+**Measured on**: AMD Ryzen 7 8845HS, Go 1.22, Linux  
+**Configuration**: `Workers = GOMAXPROCS`, SegmentSize = 4096, SegmentCount = auto
+
+| Scenario                              | Result |
+|--------------------------------------|--------|
+| Steady-state throughput              | **~19.7 M jobs/sec** |
+| Scheduler + queue + minimal job cost                | **~50 ns/op** |
+| Allocations per operation            | **0 allocs/op** |
+| Queue type                           | Lock-free segmented FIFO |
+| Producers / consumers                | MPMC safe |
+
+Benchmark excerpt:
+
+```
+BenchmarkPool/W=GOMAX_S,C=128-16
+22668182 ops · 50.7 ns/op · 19.73 Mjobs/sec · 0 allocs/op
+```
+
+These numbers reflect **scheduler + queue overhead only** with minimal job bodies.
+Actual throughput depends on job cost, segment sizing, and CPU topology.
+
+
 
 ---
 
@@ -195,7 +219,7 @@ type Options struct {
 	SegmentSize   uint32
 	SegmentCount  uint32
 	PoolCapacity  uint32
-	QT            QueueType
+	//QT            QueueType not used for now
 	PinWorkers    bool
 }
 ```
@@ -216,12 +240,12 @@ Currently implemented:
 
 ## What This Is (and Isn’t)
 
-✅ This **is**:
+This **is**:
 - a high-performance execution engine
 - suitable for internal systems, pipelines, schedulers
 - ideal when you care about ns/op and cache lines
 
-❌ This is **not**:
+This is **not**:
 - a feature-rich task framework
 - a priority scheduler (yet)
 - a general-purpose job system
