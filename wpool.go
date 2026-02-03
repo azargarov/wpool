@@ -280,6 +280,7 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
 		select {
 		case p.idleWorkers <- wake:
 		case <-p.doneCh:
+			for p.batchProcessJob() > 0 {}
 			return
 		default:
 			//TODO: timer/submit can still find other workers but if handle it might reduce wake efficiency
