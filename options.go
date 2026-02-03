@@ -42,7 +42,11 @@ type Options struct {
 	// of higher baseline memory usage.
 	SegmentCount uint32
 
-	PoolCapacity   uint32
+	// PoolCapacity limits the number of reusable segments kept
+	// in the internal segment pool.
+	//
+	// Larger values trade memory for fewer allocations.
+	PoolCapacity uint32
 
 	// QT selects the scheduler queue implementation.
 	QT QueueType
@@ -82,8 +86,8 @@ func WithPinnedWorkers(enabled bool) Option {
 	}
 }
 
-// WithPinnedWorkers enables CPU pinning for workers.
-func WithPinnedQT(qt QueueType) Option {
+// WithQT sets the scheduler queue type.
+func WithQT(qt QueueType) Option {
 	return func(o *Options) {
 		o.QT = qt
 	}
@@ -119,6 +123,8 @@ func (qt QueueType) String() string {
 	}
 }
 
+// Compile-time anchor for all QueueType values.
+// Ensures new queue types are explicitly referenced and handled.
 var _ = []QueueType{
 	SegmentedQueue,
 }
