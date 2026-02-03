@@ -1,6 +1,8 @@
 # workerpool — High-Performance Batch Worker Pool for Go
 
-`workerpool` is a **high-throughput, bounded-concurrency worker pool** for Go, built around a **lock-free segmented FIFO queue** and **batch-based scheduling**.
+`workerpool` is a **high-throughput, bounded-concurrency worker pool** for Go.
+It is built around a **lock-free segmented FIFO queue** and **batch-based scheduling**
+to minimize contention and allocation overhead under load.
 
 It is designed for workloads where:
 - job execution is cheap,
@@ -8,11 +10,10 @@ It is designed for workloads where:
 - contention must be minimized,
 - memory allocation must be predictable.
 
-
 Module:
 
 ```
-github.com/azargarov/go-utils/wpool
+github.com/azargarov/wpool
 ```
 
 ## Performance at a Glance
@@ -23,7 +24,7 @@ github.com/azargarov/go-utils/wpool
 | Scenario                              | Result |
 |--------------------------------------|--------|
 | Steady-state throughput              | **~19.7 M jobs/sec** |
-| Scheduler + queue + minimal job cost                | **~50 ns/op** |
+| Scheduler + queue + minimal job cost | **~50 ns/op** |
 | Allocations per operation            | **0 allocs/op** |
 | Queue type                           | Lock-free segmented FIFO |
 | Producers / consumers                | MPMC safe |
@@ -37,8 +38,6 @@ BenchmarkPool/W=GOMAX_S,C=128-16
 
 These numbers reflect **scheduler + queue overhead only** with minimal job bodies.
 Actual throughput depends on job cost, segment sizing, and CPU topology.
-
-
 
 ---
 
@@ -79,14 +78,14 @@ The queue is optimized to keep producers and consumers mostly independent, reduc
 - **Low-overhead metrics hook**
   - Metrics policy is injected, not hardcoded
 - **Optional CPU pinning**
-  - Improves cache locality on NUMA / high-core systems
+  - Linux-only, workload-dependent
 
 ---
 
 ## Installation
 
 ```bash
-go get github.com/azargarov/go-utils/wpool
+go get github.com/azargarov/wpool
 ```
 
 ---
@@ -100,7 +99,7 @@ import (
 	"context"
 	"fmt"
 
-	wp "github.com/azargarov/go-utils/wpool"
+	wp "github.com/azargarov/wpool"
 )
 
 func main() {
@@ -137,11 +136,12 @@ type Job[T any] struct {
 }
 ```
 
-- `Ctx` is checked before enqueueing
+- `Ctx` is checked before execution
 - `CleanupFunc` is guaranteed to run after execution
-- Jobs are executed **in FIFO order**
+- Jobs are dequeued in FIFO order within the scheduler queue
 
-> Note: `basePrio` is currently unused and reserved for future schedulers.
+> Note: `basePrio` is currently unused by the default queue and exists as a
+> forward-compatible hook for future schedulers.
 
 ---
 
@@ -219,7 +219,7 @@ type Options struct {
 	SegmentSize   uint32
 	SegmentCount  uint32
 	PoolCapacity  uint32
-	//QT            QueueType not used for now
+	QT            QueueType
 	PinWorkers    bool
 }
 ```
@@ -234,7 +234,8 @@ Currently implemented:
 
 - **SegmentedQueue** — lock-free FIFO queue
 
-`QueueType` exists as an extension point. Other schedulers (bucketed, priority, aging) are **not yet wired in**.
+`QueueType` exists as an extension point. Other schedulers (bucketed, priority, aging)
+are not yet wired in.
 
 ---
 
