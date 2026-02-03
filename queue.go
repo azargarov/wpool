@@ -1,3 +1,15 @@
+package workerpool
+
+// Batch represents a contiguous group of jobs dequeued from a schedQueue.
+//
+// The batch must be completed by calling OnBatchDone on the originating
+// queue to allow proper resource reclamation.
+type Batch[T any] struct {
+	Jobs []Job[T]
+	Seg  *segment[T]
+	End  uint32
+}
+
 // schedQueue defines the minimal interface required by the scheduler
 // to enqueue and dequeue jobs.
 //
@@ -7,22 +19,10 @@
 // The interface is intentionally small to allow multiple queue
 // strategies (e.g. segmented, bucketed, priority-based) to be swapped
 // without affecting the pool logic.
-// The schedQueue abstraction decouples scheduling policy from execution.
-// This allows experimentation with different queue designs without
 //
+// The schedQueue abstraction decouples scheduling policy from execution,
+// allowing experimentation with different queue designs without
 // impacting the worker pool core.
-// NOTE: New queue types can be added here without modifying
-// the scheduler or worker logic, as long as they implement schedQueue.
-package workerpool
-
-import ()
-
-type Batch[T any] struct {
-	Jobs 	[]Job[T]
-	Seg  	*segment[T]
-	End  	uint32 
-}
-
 type schedQueue[T any] interface {
 	// Push appends a job to the queue.
 	//
@@ -36,13 +36,17 @@ type schedQueue[T any] interface {
 	// The boolean result reports whether any jobs were returned.
 	BatchPop() (Batch[T], bool) //([]Job[T], bool)
 
+	// OnBatchDone signals that a previously dequeued batch
+	// has finished processing.
+	OnBatchDone(b Batch[T])
+
+	// MaybeHasWork performs a fast, approximate check
+	// for whether the queue may contain work.
+	MaybeHasWork() bool
+	
 	// Len returns the number of jobs currently enqueued.
 	//
 	// Implementations may return an approximate value.
-
-	OnBatchDone(b Batch[T])
-	MaybeHasWork() bool 
-
 	Len() int
 }
 
