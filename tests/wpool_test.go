@@ -16,14 +16,14 @@ var queueTypes = []wp.QueueType{
 
 func newTestPool(workers int, qt wp.QueueType) *wp.Pool[int, *wp.NoopMetrics] {
 	m := &wp.NoopMetrics{}
-	return wp.NewPool[*wp.NoopMetrics,int](m,wp.WithWorkers(workers), wp.WithPinnedQT(qt))
+	return wp.NewPool[*wp.NoopMetrics, int](m, wp.WithWorkers(workers), wp.WithQT(qt))
 }
 
-//TODO: add more checks
+// TODO: add more checks
 func TestFillDefaults(t *testing.T) {
 	var o wp.Options
 	o.FillDefaults()
-	if o.Workers <= 0  {
+	if o.Workers <= 0 {
 		t.Fatal("defaults not filled")
 	}
 }
@@ -43,17 +43,17 @@ func TestPoolQueues(t *testing.T) {
 				t.Parallel()
 				shutdownTimeout(t, qt)
 			})
-//
+			//
 			t.Run("SubmitAfterShutdown", func(t *testing.T) {
 				t.Parallel()
 				submitAfterShutdown(t, qt)
 			})
-//
+			//
 			t.Run("PanicRecoveryAndCleanup", func(t *testing.T) {
 				t.Parallel()
 				panicRecoveryAndCleanup(t, qt)
 			})
-//
+			//
 			t.Run("SubmitCanceledContext", func(t *testing.T) {
 				t.Parallel()
 				submitCanceledContext(t, qt)
@@ -216,7 +216,6 @@ func panicRecoveryAndCleanup(t *testing.T, qt wp.QueueType) {
 	}
 }
 
-
 func submitCanceledContext(t *testing.T, qt wp.QueueType) {
 	t.Helper()
 
@@ -234,5 +233,3 @@ func submitCanceledContext(t *testing.T, qt wp.QueueType) {
 		t.Fatal("expected error when submitting with canceled context")
 	}
 }
-
-

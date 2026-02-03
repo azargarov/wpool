@@ -1,51 +1,82 @@
 package workerpool_test
 
-import(
-	"testing"
+import (
 	wp "github.com/azargarov/wpool"
-
+	"runtime"
+	"testing"
 )
 
 func BenchmarkBucketQueue_PushOnly(b *testing.B) {
+	workers := runtime.GOMAXPROCS(0) * 2
 
-    q := wp.NewSegmentedQ[int](4096, 16256)
-    baseJob := wp.Job[int]{Fn: func(int) error { return nil }}
+	opts := wp.Options{
+		Workers:      workers,
+		QT:           wp.SegmentedQueue,
+		SegmentSize:  1024,
+		SegmentCount: 256,
+		PinWorkers:   true,
+	}
+	q := wp.NewSegmentedQ[int](opts)
+	baseJob := wp.Job[int]{Fn: func(int) error { return nil }}
 
-    b.ReportAllocs()
+	b.ReportAllocs()
 
-    for b.Loop() {
-        q.Push(baseJob)
-    }
+	for b.Loop() {
+		q.Push(baseJob)
+	}
 }
 
 func BenchmarkBucketQueue_PopOnly(b *testing.B) {
-    q := wp.NewSegmentedQ[int](4096, 16256)
-    job := wp.Job[int]{Fn: func(int) error { return nil }}
+	workers := runtime.GOMAXPROCS(0) * 2
 
-    const prefill = 4096 
-    for range prefill {
-        q.Push(job)
-    }
+	opts := wp.Options{
+		Workers:      workers,
+		QT:           wp.SegmentedQueue,
+		SegmentSize:  1024,
+		SegmentCount: 256,
+		PinWorkers:   true,
+	}
+	q := wp.NewSegmentedQ[int](opts)
+	job := wp.Job[int]{Fn: func(int) error { return nil }}
 
-    b.ReportAllocs()
+	const prefill = 4096
+	for range prefill {
+		q.Push(job)
+	}
 
-    for b.Loop() {
-        _, ok := q.BatchPop()
-        if !ok {
-            b.Fatal("queue unexpectedly empty")
-        }
-        q.Push(job)
-    }
+	b.ReportAllocs()
+
+	for b.Loop() {
+		_, ok := q.BatchPop()
+		if !ok {
+			b.Fatal("queue unexpectedly empty")
+		}
+		q.Push(job)
+	}
 }
 
 func BenchmarkBucketQueue_PushPop(b *testing.B) {
-    q := wp.NewSegmentedQ[int](4096, 16256)
-    job := wp.Job[int]{Fn: func(int) error { return nil }}
 
-    b.ReportAllocs()
+	workers := runtime.GOMAXPROCS(0)
 
-    for b.Loop() {
-        q.Push(job)
-        _, _ = q.BatchPop()
-    }
+	opts := wp.Options{
+		Workers:      workers,
+		QT:           wp.SegmentedQueue,
+		SegmentSize:  512,
+		SegmentCount: 8,
+		PoolCapacity: 8,
+		PinWorkers:   true,
+	}
+	q := wp.NewSegmentedQ[int](opts)
+	job := wp.Job[int]{Fn: func(int) error { return nil }}
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		q.Push(job)
+		_, ok := q.BatchPop()
+		if !ok {
+			panic("Failed pop")
+		}
+	}
 }
