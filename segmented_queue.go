@@ -347,7 +347,13 @@ func (q *segmentedQ[T]) tryRecycle(seg *segment[T]) {
 
 // Len returns an approximate number of jobs in the queue.
 // Currently unimplemented.
-func (q *segmentedQ[T]) Len() int { return 0 }
+func (q *segmentedQ[T]) Len() int { 
+	// approximate 
+    seg := q.head.Load()
+    h := atomic.LoadUint32(&seg.consumer.head)
+    r := atomic.LoadUint32(&seg.producer.reserve)
+    return int(r - h)
+}
 
 // MaybeHasWork performs a fast, approximate check for available work.
 func (q *segmentedQ[T]) MaybeHasWork() bool {
