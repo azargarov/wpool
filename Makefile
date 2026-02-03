@@ -28,7 +28,7 @@ bench-noopt:
 
 bench-fast:
 	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem \
-		-benchtime=30ms -count=30
+		-benchtime=100ms -count=300
 
 bench-stress:
 	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem \
