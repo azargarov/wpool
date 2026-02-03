@@ -95,7 +95,7 @@ type Pool[T any, M MetricsPolicy] struct {
 
 	// OnInternaError is called when the pool encounters
 	// an unexpected internal error.
-	OnInternaError ErrorHandler
+	OnInternalError ErrorHandler
 
 	// OnJobError is called when a job function returns an error.	
 	OnJobError     ErrorHandler
