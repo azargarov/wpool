@@ -3,6 +3,7 @@ TEST_PKG     := ./tests
 TEST_OUT     := ./tests/out
 BENCH_FULL   := BenchmarkPool$$
 BENCH_SINGLE := BenchmarkPool_single
+DEBUG_FLAGS  := OBSERVER=1
 GOFLAGS      :=
 GCFLAGS      := all=-l=4 -B
 
@@ -39,7 +40,7 @@ bench-long:
 		-benchtime=10s -count=5
 
 bench-debug:
-	go test -tags=debug $(TEST_PKG) -run=^$$ -bench=$(BENCH_FULL) -benchmem \
+	$(DEBUG_FLAGS) go test -tags=debug $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem \
 		-count=1 -cpuprofile $(TEST_OUT)/cpu.out -memprofile $(TEST_OUT)/mem.out -o $(TEST_OUT)/tests.test
 
 pprof-mem:
