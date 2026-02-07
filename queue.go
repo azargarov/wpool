@@ -34,7 +34,7 @@ type schedQueue[T any] interface {
 	//
 	// The returned slice must be treated as read-only.
 	// The boolean result reports whether any jobs were returned.
-	BatchPop() (Batch[T], bool) //([]Job[T], bool)
+	BatchPop() (Batch[T], bool) 
 
 	// OnBatchDone signals that a previously dequeued batch
 	// has finished processing.
@@ -50,17 +50,3 @@ type schedQueue[T any] interface {
 	Len() int
 }
 
-// makeQueue constructs the scheduler queue according to pool options.
-//
-// The selected queue implementation defines the scheduling behavior
-// and performance characteristics of the pool.
-func (p *Pool[T, M]) makeQueue() schedQueue[T] {
-	switch p.opts.QT {
-	case SegmentedQueue:
-		return NewSegmentedQ[T](p.opts)
-
-	default:
-		return NewSegmentedQ[T](p.opts)
-
-	}
-}
