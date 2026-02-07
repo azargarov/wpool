@@ -13,11 +13,11 @@ const (
 	// defaultPushBatch is the minimum number of pending jobs
 	// required before a worker wake-up is triggered eagerly.
 	// Smaller values reduce latency, larger values improve batching.
-	defaultPushBatch   = 64
+	defaultPushBatch   = 256
 
 	// batchTimerInterval is the periodic interval used by the batch timer
 	// to ensure progress even if no new submissions arrive.
-	batchTimerInterval = 50 * time.Microsecond
+	batchTimerInterval = 30 * time.Microsecond
 )
 
 var (
@@ -71,6 +71,8 @@ type Pool[T any, M MetricsPolicy] struct {
 	metricsMu     sync.Mutex
 	metrics       M
 	queue         schedQueue[T]
+
+	sched     	  scheduler[T]
 
 	// wakes is a per-worker wake-up channel.
 	wakes         []WakeupWorker
@@ -128,7 +130,8 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 		idleWorkers:   make(chan WakeupWorker, opts.Workers),
 		workersActive: make([]atomic.Bool, opts.Workers),
 	}
-	p.queue = p.makeQueue()
+	//p.queue = p.makeQueue()
+	p.sched = NewRevolvingBucketQ[T](opts)
 	p.metrics = metrics
 	p.wakes = make([]WakeupWorker, opts.Workers)
 	for i := 0; i < opts.Workers; i++ {
@@ -201,8 +204,9 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 	default:
 	}
 
-	ok := p.queue.Push(job)
-	if !ok {
+	err := p.sched.Push(job,BucketPriority(basePrio))
+	if err != nil {
+		// TODO: not neceserely full
 		return ErrQueueFull
 	}
 	p.metrics.IncQueued()
