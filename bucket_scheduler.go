@@ -71,7 +71,7 @@ func NewRevolvingBucketQ[T any](opts Options) *RevolvingBucketQ[T] {
 
 func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
 
-	p := job.Priority
+	p := job.GetPriority()
 	if p < MinBucketPriority || p > MaxBucketPriority {
 		return ErrInvalidPriority
 	}
@@ -173,9 +173,6 @@ func (rq *RevolvingBucketQ[T]) rotate() bool {
 
 func (rq *RevolvingBucketQ[T]) OnBatchDone(b Batch[T]) {
 
-    //if b.Seg == nil {
-    //    return
-    //}
 	bucket, ok := b.Meta.(uint8)
 	if ! ok{
 		panic("Could not convert any to uint8")

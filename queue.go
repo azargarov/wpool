@@ -4,6 +4,8 @@ import(
 	"context"
 )
 
+const jobPrioMask  uint64 = 0b0011_1111 
+
 // Batch represents a contiguous group of jobs dequeued from a schedQueue.
 //
 // The batch must be completed by calling OnBatchDone on the originating
@@ -31,12 +33,22 @@ type JobFunc[T any] func(T) error
 type Job[T any] struct {
 	Payload     T
 	Fn          JobFunc[T]
-	Priority 	JobPriority
-	
+	Flags 		uint64
+	Meta    	*JobMeta 
+}
+
+type JobMeta struct {
 	Ctx         context.Context
 	CleanupFunc func()
 }
 
+func (j *Job[T]) SetPriority(p JobPriority) {
+	j.Flags = (j.Flags & ^jobPrioMask) | uint64(p)
+}
+
+func (j Job[T]) GetPriority() JobPriority {
+	return JobPriority(j.Flags & jobPrioMask)
+}
 
 // schedQueue defines the minimal interface required by the scheduler
 // to enqueue and dequeue jobs.

@@ -1,7 +1,6 @@
 package workerpool
 
 import (
-	"context"
 	"errors"
 	"fmt"
 )
@@ -33,27 +32,26 @@ func (p *Pool[T, M]) runBatch(jobs []Job[T]) {
 //   - execution metrics are updated exactly once
 func (p *Pool[T, M]) runJob(j Job[T]) (err error) {
 
-	if j.Ctx == nil {
-		j.Ctx = context.Background()
-	}
-	// Ensure cleanup is always attempted, even if the job panics.
-	if j.CleanupFunc != nil {
-		defer func() {
-            // Cleanup panics are intentionally suppressed.
-			defer func() { _ = recover() }()
-			j.CleanupFunc()
-		}()
+	if meta := j.Meta; meta != nil{
+		if meta.Ctx != nil {
+			select {
+			case <-meta.Ctx.Done():
+				return meta.Ctx.Err()
+			default:
+			}
+		}
+		// Ensure cleanup is always attempted, even if the job panics.
+		if meta.CleanupFunc != nil {
+			defer func() {
+				// Cleanup panics are intentionally suppressed.
+				defer func() { _ = recover() }()
+				meta.CleanupFunc()
+			}()
+		}
 	}
 
     // Count job execution regardless of outcome.
 	defer p.metrics.IncExecuted()
-
-	// Respect job cancellation before execution.
-	select {
-	case <-j.Ctx.Done():
-		return j.Ctx.Err()
-	default:
-	}
 
 	if j.Fn == nil {
 		return ErrNilFunc

@@ -76,9 +76,11 @@ func jobSuccess(t *testing.T, qt wp.QueueType) {
 	jobCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	meta := wp.JobMeta{Ctx:jobCtx}
+
 	err := p.Submit(wp.Job[int]{
 		Payload: 1,
-		Ctx:     jobCtx,
+		Meta:     &meta,
 		Fn: func(n int) error {
 			close(done)
 			return nil
@@ -111,9 +113,11 @@ func shutdownTimeout(t *testing.T, qt wp.QueueType) {
 	started := make(chan struct{})
 	done := make(chan struct{})
 
+	meta := wp.JobMeta{Ctx:context.Background()}
+
 	_ = p.Submit(wp.Job[int]{
 		Payload: 1,
-		Ctx:     context.Background(),
+		Meta:     &meta,
 		Fn: func(int) error {
 			close(started)
 			time.Sleep(300 * time.Millisecond)
@@ -152,9 +156,11 @@ func submitAfterShutdown(t *testing.T, qt wp.QueueType) {
 	p := newTestPool(1, qt)
 	_ = p.Shutdown(context.Background())
 
+	meta := wp.JobMeta{Ctx:context.Background()}
+
 	if err := p.Submit(wp.Job[int]{
 		Payload: 1,
-		Ctx:     context.Background(),
+		Meta:     &meta,
 		Fn:      func(int) error { return nil },
 	}); err == nil {
 		t.Fatal("Submit succeeded on closed pool; want error")
@@ -171,32 +177,39 @@ func panicRecoveryAndCleanup(t *testing.T, qt wp.QueueType) {
 	cleaned := 0
 	secondDone := make(chan struct{})
 
-	// first job panics
-	_ = p.Submit(wp.Job[int]{
-		Payload: 1,
-		Ctx:     context.Background(),
-		Fn: func(int) error {
-			panic("boom")
-		},
+	meta := wp.JobMeta{Ctx:context.Background(), 
 		CleanupFunc: func() {
 			mu.Lock()
 			cleaned++
 			mu.Unlock()
 		},
+	}
+
+	// first job panics
+	_ = p.Submit(wp.Job[int]{
+		Payload: 1,
+		Meta:     &meta,
+		Fn: func(int) error {
+			panic("boom")
+		},
+	
 	})
+
+	meta2 := wp.JobMeta{Ctx:context.Background(), 
+			CleanupFunc: func() {
+				mu.Lock()
+				cleaned++
+				mu.Unlock()
+			},
+		}
 
 	// second job should still run
 	_ = p.Submit(wp.Job[int]{
 		Payload: 2,
-		Ctx:     context.Background(),
+		Meta:     &meta2,
 		Fn: func(int) error {
 			close(secondDone)
 			return nil
-		},
-		CleanupFunc: func() {
-			mu.Lock()
-			cleaned++
-			mu.Unlock()
 		},
 	})
 
@@ -224,9 +237,10 @@ func submitCanceledContext(t *testing.T, qt wp.QueueType) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	meta := wp.JobMeta{Ctx:ctx}
 
 	err := p.Submit(wp.Job[int]{
-		Ctx: ctx,
+		Meta: &meta,
 		Fn:  func(int) error { return nil },
 	})
 	if err == nil {

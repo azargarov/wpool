@@ -185,14 +185,13 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 		return ErrNilFunc
 	}
 
-	if job.Ctx == nil {
-		job.Ctx = context.Background()
-	}
-
-	select {
-	case <-job.Ctx.Done():
-		return job.Ctx.Err()
-	default:
+	meta := job.Meta
+	if meta != nil && meta.Ctx !=nil{
+		select {
+		case <-meta.Ctx.Done():
+			return meta.Ctx.Err()
+		default:
+		}
 	}
 
 	err := p.queue.Push(job)

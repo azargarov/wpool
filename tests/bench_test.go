@@ -121,8 +121,8 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, pinned bool) {
 	//i:= 1
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			//prio = i%62
-			job.Priority = (wp.JobPriority)(rand.Intn(62) + 1)
+			prio := (wp.JobPriority)(rand.Intn(62) + 1)
+			job.SetPriority(prio)
 			if err := pool.Submit(job); err != nil {
 				panic(err)
 			}
