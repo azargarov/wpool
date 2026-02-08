@@ -45,9 +45,9 @@ func BenchmarkPool(b *testing.B) {
 		segmentCount int
 		pinned       bool
 	}{
-		{"W=GOMAX_S,C=8", runtime.GOMAXPROCS(0), 2048, 8, false},
-		{"W=GOMAX_S,C=16", runtime.GOMAXPROCS(0), 2048, 16, false},
-		{"W=2xGOMAX_S,C=32", runtime.GOMAXPROCS(0) , 2048, 32, false},
+		{"W=GOMAX_S,C=8", runtime.GOMAXPROCS(0), 1024, 8, false},
+		{"W=GOMAX_S,C=16", runtime.GOMAXPROCS(0), 1024, 16, false},
+		{"W=2xGOMAX_S,C=32", runtime.GOMAXPROCS(0) , 1024, 32, false},
 		{"W=GOMAX_S,C=32,PINNED", runtime.GOMAXPROCS(0) , 1024, 32, true},
 	}
 
@@ -60,7 +60,7 @@ func BenchmarkPool(b *testing.B) {
 
 func BenchmarkPool_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
-	segmentSize := getenvInt("SEGSIZE", 1024)
+	segmentSize := getenvInt("SEGSIZE", 4096)
 	segmentCount := getenvInt("SEGCOUNT", 8)
 	pinned := getenvInt("PINNED", 0) > 0
 
@@ -86,7 +86,7 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, pinned bool) {
 
 	opts := wp.Options{
 		Workers:      workers,
-		QT:           wp.SegmentedQueue,
+		QT:           wp.RevolvingBucketQueue,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
 		PoolCapacity: 2048,
@@ -121,9 +121,9 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, pinned bool) {
 	//i:= 1
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			prio := rand.Intn(60) + 1
 			//prio = i%62
-			if err := pool.Submit(job, prio); err != nil {
+			job.Priority = (wp.JobPriority)(rand.Intn(62) + 1)
+			if err := pool.Submit(job); err != nil {
 				panic(err)
 			}
 			submitted.Add(1)

@@ -13,7 +13,7 @@ func BenchmarkBucketQueue_PushOnly(b *testing.B) {
 		Workers:      workers,
 		QT:           wp.SegmentedQueue,
 		SegmentSize:  1024,
-		SegmentCount: 256,
+		SegmentCount: 2,
 		PinWorkers:   true,
 	}
 	q := wp.NewSegmentedQ[int](opts)
@@ -33,8 +33,8 @@ func BenchmarkBucketQueue_PopOnly(b *testing.B) {
 		Workers:      workers,
 		QT:           wp.SegmentedQueue,
 		SegmentSize:  1024,
-		SegmentCount: 256,
-		PinWorkers:   true,
+		SegmentCount: 2,
+		PinWorkers:   false,
 	}
 	q := wp.NewSegmentedQ[int](opts)
 	job := wp.Job[int]{Fn: func(int) error { return nil }}
@@ -63,7 +63,7 @@ func BenchmarkBucketQueue_PushPop(b *testing.B) {
 		Workers:      workers,
 		QT:           wp.SegmentedQueue,
 		SegmentSize:  512,
-		SegmentCount: 8,
+		SegmentCount: 2,
 		PoolCapacity: 8,
 		PinWorkers:   true,
 	}
