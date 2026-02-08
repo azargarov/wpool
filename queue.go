@@ -2,10 +2,19 @@ package workerpool
 
 import(
 	"context"
+	"errors"
 )
 
 const jobPrioMask  uint64 = 0b0011_1111 
 
+var (
+	// ErrQueueFull is returned when the underlying queue
+	// cannot accept more jobs.
+	ErrQueueFull = errors.New("queue: queue is full")
+
+	// ErrNilFunc is returned when a submitted Job has a nil Fn.
+	ErrNilFunc   = errors.New("queue: job func is nil")
+)
 // Batch represents a contiguous group of jobs dequeued from a schedQueue.
 //
 // The batch must be completed by calling OnBatchDone on the originating

@@ -24,13 +24,6 @@ var (
 	// ErrClosed is returned when submitting a job to a pool
 	// that has already been shut down.
 	ErrClosed    = errors.New("workerpool: pool is closed")
-
-	// ErrQueueFull is returned when the underlying queue
-	// cannot accept more jobs.
-	ErrQueueFull = errors.New("workerpool: queue is full")
-
-	// ErrNilFunc is returned when a submitted Job has a nil Fn.
-	ErrNilFunc   = errors.New("workerpool: job func is nil")
 )
 
 
@@ -196,9 +189,9 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 
 	err := p.queue.Push(job)
 	if err != nil {
-		// TODO: not neceserely full
-		return ErrQueueFull
+		return err
 	}
+
 	p.metrics.IncQueued()
 
 	pj := p.pendingJobs.Add(1)
