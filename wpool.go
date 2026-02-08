@@ -32,8 +32,7 @@ var (
 	// ErrNilFunc is returned when a submitted Job has a nil Fn.
 	ErrNilFunc   = errors.New("workerpool: job func is nil")
 )
-// JobFunc is the function executed by a worker for a given job payload.
-type JobFunc[T any] func(T) error
+
 
 // ErrorHandler is a user-provided callback invoked on internal
 // or job-level errors.
@@ -42,18 +41,6 @@ type ErrorHandler func(e error)
 // WakeupWorker is a lightweight signal channel used to wake
 // an idle worker.
 type WakeupWorker chan struct{}
-
-// Job represents a single unit of work submitted to the pool.
-//
-// Payload is passed to Fn when executed.
-// Ctx controls cancellation before execution.
-// CleanupFunc, if set, is executed after job completion.
-type Job[T any] struct {
-	Payload     T
-	Fn          JobFunc[T]
-	Ctx         context.Context
-	CleanupFunc func()
-}
 
 // Pool is a high-performance worker pool with batched scheduling.
 //
@@ -71,8 +58,6 @@ type Pool[T any, M MetricsPolicy] struct {
 	metricsMu     sync.Mutex
 	metrics       M
 	queue         schedQueue[T]
-
-	sched     	  scheduler[T]
 
 	// wakes is a per-worker wake-up channel.
 	wakes         []WakeupWorker
@@ -131,7 +116,13 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 		workersActive: make([]atomic.Bool, opts.Workers),
 	}
 	//p.queue = p.makeQueue()
-	p.sched = NewRevolvingBucketQ[T](opts)
+    switch opts.QT {
+    case SegmentedQueue:
+        p.queue = NewSegmentedQ[T](opts)
+    case RevolvingBucketQueue:
+        p.queue = NewRevolvingBucketQ[T](opts)
+    }
+	//p.queue = NewRevolvingBucketQ[T](opts)
 	p.metrics = metrics
 	p.wakes = make([]WakeupWorker, opts.Workers)
 	for i := 0; i < opts.Workers; i++ {
@@ -185,7 +176,7 @@ func (p *Pool[T, M]) Stop() { _ = p.Shutdown(context.Background()) }
 //
 // It may trigger a worker wake-up depending on batching state.
 // Submit is non-blocking and safe for concurrent use.
-func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
+func (p *Pool[T, M]) Submit(job Job[T]) error {
 	if p.shutdown.Load() {
 		return ErrClosed
 	}
@@ -204,7 +195,7 @@ func (p *Pool[T, M]) Submit(job Job[T], basePrio int) error {
 	default:
 	}
 
-	err := p.sched.Push(job,BucketPriority(basePrio))
+	err := p.queue.Push(job)
 	if err != nil {
 		// TODO: not neceserely full
 		return ErrQueueFull

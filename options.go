@@ -19,6 +19,8 @@ const (
 	// It is optimized for high-throughput workloads with many producers
 	// and batch-oriented consumption.
 	SegmentedQueue QueueType = iota
+
+	RevolvingBucketQueue	
 )
 
 // Options configure the behavior of a worker Pool.

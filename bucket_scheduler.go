@@ -14,12 +14,10 @@ var (
 	ErrPushSegmentedQ  = errors.New("bucket queue: failed to push into segmented queue")
 )
 
-type BucketPriority uint8
-
 const (
-	MinBucketPriority BucketPriority = 1
-	MaxBucketPriority BucketPriority = 63
-	BucketCount          			 = 64
+	MinBucketPriority JobPriority = 1
+	MaxBucketPriority JobPriority = 63
+	BucketCount          		  = 64
 )
 
 type bucket[T any] struct {
@@ -71,8 +69,9 @@ func NewRevolvingBucketQ[T any](opts Options) *RevolvingBucketQ[T] {
 	return rq
 }
 
-func (rq *RevolvingBucketQ[T]) Push(job Job[T], p BucketPriority) ( error) {
+func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
 
+	p := job.Priority
 	if p < MinBucketPriority || p > MaxBucketPriority {
 		return ErrInvalidPriority
 	}
@@ -80,8 +79,8 @@ func (rq *RevolvingBucketQ[T]) Push(job Job[T], p BucketPriority) ( error) {
 	base := uint8(rq.state.base.Load() & 63)
     idx := (base + uint8(p)) & 63 
 
-	ok := rq.buckets[idx].q.Push(job)
-	if !ok {
+	err := rq.buckets[idx].q.Push(job)
+	if err != nil {
 		return ErrPushSegmentedQ
 	}
 	// debug
@@ -101,10 +100,10 @@ func (rq *RevolvingBucketQ[T]) Push(job Job[T], p BucketPriority) ( error) {
 	return nil
 }
 
-func (rq *RevolvingBucketQ[T]) Pop() (ScheduledBatch[T], bool) {
+func (rq *RevolvingBucketQ[T]) BatchPop() (Batch[T], bool) {
 	if !rq.hasWork.Load() {
 	    if rq.state.nonEmptyMask.Load() == 0 {
-        	return ScheduledBatch[T]{}, false
+        	return Batch[T]{}, false
     	}
     	rq.hasWork.Store(true) 
 	}
@@ -113,11 +112,12 @@ func (rq *RevolvingBucketQ[T]) Pop() (ScheduledBatch[T], bool) {
 		base := uint8(rq.state.base.Load() & 63)
 		batch, ok := rq.buckets[base].q.BatchPop()
 		if ok {
+			batch.Meta = base
 			//debug
 			schedDbgIncPops(base)
 			schedDbgAddTotalPops(uint64(len(batch.Jobs)))
 
-			return ScheduledBatch[T]{Batch: batch, Bucket: base}, true
+			return batch, true
 		}
 		// debug
 		schedDbgIncPopMisses(base)
@@ -130,7 +130,7 @@ func (rq *RevolvingBucketQ[T]) Pop() (ScheduledBatch[T], bool) {
 		}
 
 		if !rq.rotate() {
-			return ScheduledBatch[T]{}, false
+			return Batch[T]{}, false
 		}
 	}
 }
@@ -171,12 +171,25 @@ func (rq *RevolvingBucketQ[T]) rotate() bool {
     }
 }
 
-func (rq *RevolvingBucketQ[T]) OnBatchDone(b ScheduledBatch[T]) {
-    if b.Batch.Seg == nil {
-        return
-    }
+func (rq *RevolvingBucketQ[T]) OnBatchDone(b Batch[T]) {
 
-    idx := b.Bucket
-    rq.buckets[idx].q.OnBatchDone(b.Batch)
+    //if b.Seg == nil {
+    //    return
+    //}
+	bucket, ok := b.Meta.(uint8)
+	if ! ok{
+		panic("Could not convert any to uint8")
+	}
+    rq.buckets[bucket].q.OnBatchDone(b)
 }
 
+// Len returns an approximate number of jobs in the queue.
+// Currently unimplemented.
+func (rq *RevolvingBucketQ[T])  Len() int { 
+    return 0
+}
+
+// MaybeHasWork performs a fast, approximate check for available work.
+func (rq *RevolvingBucketQ[T])  MaybeHasWork() bool {
+	return false
+}

@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"errors"
 )
 
 // cachePad is used to prevent false sharing between hot fields.
@@ -20,7 +21,9 @@ const (
 // DefaultSegmentCount defines the default number of preallocated segments.
 // It scales with GOMAXPROCS to reduce contention under load.
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
-
+var (
+	segErrorNilSegment = errors.New("NULL segment")
+)
 // producerView contains fields frequently modified by producers.
 type producerView struct {
 	tail    uint32
@@ -174,11 +177,11 @@ func NewSegmentedQ[T any](opts Options) *segmentedQ[T] {
 //
 // It is lock-free and safe for concurrent producers.
 // Returns false if the queue is no longer accepting work.
-func (q *segmentedQ[T]) Push(v Job[T]) bool {
+func (q *segmentedQ[T]) Push(v Job[T]) error {
 	for {
 		seg := q.tail.Load()
 		if seg == nil {
-			return false
+			return segErrorNilSegment
 		}
 
 		if !seg.tryAddRef() {
@@ -200,7 +203,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) bool {
 				seg.buf[r] = v
 				atomic.StoreUint32(&seg.ready[r], g)
 				seg.refs.Add(-1)
-				return true
+				return nil
 			}
 			statCASMiss()
 		}

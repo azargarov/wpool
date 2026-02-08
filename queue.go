@@ -1,5 +1,9 @@
 package workerpool
 
+import(
+	"context"
+)
+
 // Batch represents a contiguous group of jobs dequeued from a schedQueue.
 //
 // The batch must be completed by calling OnBatchDone on the originating
@@ -8,7 +12,31 @@ type Batch[T any] struct {
 	Jobs []Job[T]
 	Seg  *segment[T]
 	End  uint32
+	
+	// Meta is an optional, queue-private field.
+	// It is opaque to the pool and interpreted only by the queue implementation.
+	Meta	any
 }
+
+type JobPriority uint8
+
+// JobFunc is the function executed by a worker for a given job payload.
+type JobFunc[T any] func(T) error
+
+// Job represents a single unit of work submitted to the pool.
+//
+// Payload is passed to Fn when executed.
+// Ctx controls cancellation before execution.
+// CleanupFunc, if set, is executed after job completion.
+type Job[T any] struct {
+	Payload     T
+	Fn          JobFunc[T]
+	Priority 	JobPriority
+	
+	Ctx         context.Context
+	CleanupFunc func()
+}
+
 
 // schedQueue defines the minimal interface required by the scheduler
 // to enqueue and dequeue jobs.
@@ -28,7 +56,7 @@ type schedQueue[T any] interface {
 	//
 	// It returns true once the job has been successfully enqueued
 	// and made visible to consumers.
-	Push(job Job[T]) bool
+	Push(job Job[T]) error
 
 	// BatchPop removes and returns a contiguous batch of jobs.
 	//
@@ -40,13 +68,13 @@ type schedQueue[T any] interface {
 	// has finished processing.
 	OnBatchDone(b Batch[T])
 
-	// MaybeHasWork performs a fast, approximate check
-	// for whether the queue may contain work.
-	MaybeHasWork() bool
-	
-	// Len returns the number of jobs currently enqueued.
+	//// MaybeHasWork performs a fast, approximate check
+	//// for whether the queue may contain work.
+	//MaybeHasWork() bool
 	//
-	// Implementations may return an approximate value.
-	Len() int
+	//// Len returns the number of jobs currently enqueued.
+	////
+	//// Implementations may return an approximate value.
+	//Len() int
 }
 

@@ -77,13 +77,13 @@ func (p *Pool[T, M]) batchProcessJob() int64 {
 	var counter int64
 
 	for {
-		batch, ok := p.sched.Pop()
+		batch, ok := p.queue.BatchPop()
 		if !ok {
 			return counter
 		}
 
 		p.runBatch(batch.Jobs)
 		counter += int64(len(batch.Jobs))
-		p.sched.OnBatchDone(batch)
+		p.queue.OnBatchDone(batch)
 	}
 }

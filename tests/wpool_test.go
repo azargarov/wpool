@@ -83,7 +83,7 @@ func jobSuccess(t *testing.T, qt wp.QueueType) {
 			close(done)
 			return nil
 		},
-	}, 10)
+	})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -120,7 +120,7 @@ func shutdownTimeout(t *testing.T, qt wp.QueueType) {
 			close(done)
 			return nil
 		},
-	}, 10)
+	})
 
 	select {
 	case <-started:
@@ -156,7 +156,7 @@ func submitAfterShutdown(t *testing.T, qt wp.QueueType) {
 		Payload: 1,
 		Ctx:     context.Background(),
 		Fn:      func(int) error { return nil },
-	}, 10); err == nil {
+	}); err == nil {
 		t.Fatal("Submit succeeded on closed pool; want error")
 	}
 }
@@ -183,7 +183,7 @@ func panicRecoveryAndCleanup(t *testing.T, qt wp.QueueType) {
 			cleaned++
 			mu.Unlock()
 		},
-	}, 10)
+	})
 
 	// second job should still run
 	_ = p.Submit(wp.Job[int]{
@@ -198,7 +198,7 @@ func panicRecoveryAndCleanup(t *testing.T, qt wp.QueueType) {
 			cleaned++
 			mu.Unlock()
 		},
-	}, 10)
+	})
 
 	select {
 	case <-secondDone:
@@ -228,7 +228,7 @@ func submitCanceledContext(t *testing.T, qt wp.QueueType) {
 	err := p.Submit(wp.Job[int]{
 		Ctx: ctx,
 		Fn:  func(int) error { return nil },
-	}, 1)
+	})
 	if err == nil {
 		t.Fatal("expected error when submitting with canceled context")
 	}
