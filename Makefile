@@ -56,7 +56,7 @@ perf:
 		-e cache-references,cache-misses \
 		-e branches,branch-misses \
 		-e cpu/event=0xcd,umask=0x01/ \
-		go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_FULL) -benchmem -count=4
+		go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem -count=4
 
 clean:
 	rm -f $(TEST_OUT)/*
