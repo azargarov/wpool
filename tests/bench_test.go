@@ -53,31 +53,43 @@ func BenchmarkPool(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			PoolBench(b, tc.workers, tc.segmentSize, tc.segmentCount, tc.pinned)
+			PoolBench(b, tc.workers, tc.segmentSize, tc.segmentCount, wp.RevolvingBucketQueue ,tc.pinned)
 		})
 	}
 }
 
 func BenchmarkPool_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
-	segmentSize := getenvInt("SEGSIZE", 4096)
+	segmentSize := getenvInt("SEGSIZE", 1024)
 	segmentCount := getenvInt("SEGCOUNT", 8)
 	pinned := getenvInt("PINNED", 0) > 0
 
 	b.Run(
 		fmt.Sprintf("W=%d,C=%d,PINNED=%t", workers, segmentCount, pinned),
 		func(b *testing.B) {
-			PoolBench(b, workers, segmentSize, segmentCount, pinned)
+			PoolBench(b, workers, segmentSize, segmentCount,wp.RevolvingBucketQueue ,pinned)
 		},
 	)
 }
+func BenchmarkPool_segmented_single(b *testing.B) {
+	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
+	segmentSize := getenvInt("SEGSIZE", 4096)
+	segmentCount := getenvInt("SEGCOUNT", 2)
+	pinned := getenvInt("PINNED", 0) > 0
 
+	b.Run(
+		fmt.Sprintf("W=%d,C=%d,PINNED=%t", workers, segmentCount, pinned),
+		func(b *testing.B) {
+			PoolBench(b, workers, segmentSize, segmentCount,wp.SegmentedQueue ,pinned)
+		},
+	)
+}
 // PoolBench measures sustained throughput of the worker pool.
 //
 // It intentionally reports Mjobs/sec using manual timing.
 // testing.B's ns/op is not representative for long-running,
 // parallel throughput benchmarks.
-func PoolBench(b *testing.B, workers, segSize, segCount int, pinned bool) {
+func PoolBench(b *testing.B, workers, segSize, segCount int, qt wp.QueueType,  pinned bool) {
 	if os.Getenv("PPROF") == "1" {
 		startPprof()
 		runtime.SetBlockProfileRate(1)
@@ -86,10 +98,10 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, pinned bool) {
 
 	opts := wp.Options{
 		Workers:      workers,
-		QT:           wp.RevolvingBucketQueue,
+		QT:           qt,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 2048,
+		PoolCapacity: 512,
 		PinWorkers:   pinned,
 	}
 
