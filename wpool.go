@@ -111,7 +111,7 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 	//p.queue = p.makeQueue()
     switch opts.QT {
     case SegmentedQueue:
-        p.queue = NewSegmentedQ[T](opts)
+        p.queue = NewSegmentedQ[T](opts, nil)
     case RevolvingBucketQueue:
         p.queue = NewRevolvingBucketQ[T](opts)
     }

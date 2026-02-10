@@ -7,6 +7,7 @@ import(
 // segmentPool manages reusable segments to reduce allocation pressure.
 type segmentPool[T any] struct {
 	mu      sync.Mutex
+
 	maxKeep int64
 	free    []*segment[T]
 }
@@ -39,4 +40,15 @@ func (p *segmentPool[T]) Get(pageSize uint32) *segment[T] {
 	p.mu.Unlock()
 	statConsumed()
 	return seg
+}
+
+func NewSegmentPool[T any](capacity uint32, segmentCount uint32, segmentSize uint32) segmentPoolProvider[T]{
+    pool := &segmentPool[T]{
+        maxKeep: int64(capacity),
+        free:    make([]*segment[T], 0, capacity),
+    }
+	for range segmentCount {
+		pool.free = append(pool.free, mkSegment[T](segmentSize))
+	}
+	return pool
 }

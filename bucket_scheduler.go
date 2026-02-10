@@ -46,6 +46,7 @@ type RevolvingBucketQ[T any] struct {
 	hasWork atomic.Bool
 	rotateMu sync.Mutex
 
+	pool segmentPoolProvider[T]
 
 }
 
@@ -58,8 +59,10 @@ type RevolvingBucketOptions struct {
 func NewRevolvingBucketQ[T any](opts Options) *RevolvingBucketQ[T] {
 	rq := &RevolvingBucketQ[T]{}
 
+	rq.pool =  NewSegmentPool[T](opts.PoolCapacity, opts.SegmentCount, opts.SegmentSize) 
+
 	for i := range BucketCount {
-		rq.buckets[i].q = NewSegmentedQ[T](opts)
+		rq.buckets[i].q = NewSegmentedQ(opts, rq.pool)
 	}
 
 	rq.state.base.Store(0)

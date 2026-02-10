@@ -16,7 +16,7 @@ func BenchmarkSegmentedQueue_PushOnly(b *testing.B) {
 		SegmentCount: 2,
 		PinWorkers:   true,
 	}
-	q := wp.NewSegmentedQ[int](opts)
+	q := wp.NewSegmentedQ[int](opts, nil)
 	baseJob := wp.Job[int]{Fn: func(int) error { return nil }}
 
 	b.ReportAllocs()
@@ -36,7 +36,7 @@ func BenchmarkSegmentedQueue_PopOnly(b *testing.B) {
 		SegmentCount: 2,
 		PinWorkers:   false,
 	}
-	q := wp.NewSegmentedQ[int](opts)
+	q := wp.NewSegmentedQ[int](opts, nil)
 	job := wp.Job[int]{Fn: func(int) error { return nil }}
 
 	const prefill = 4096
@@ -67,7 +67,7 @@ func BenchmarkSegmentedQueue_PushPop(b *testing.B) {
 		PoolCapacity: 64,
 		PinWorkers:   true,
 	}
-	q := wp.NewSegmentedQ[int](opts)
+	q := wp.NewSegmentedQ[int](opts, nil)
 	job := wp.Job[int]{Fn: func(int) error { return nil }}
 
 	b.ReportAllocs()
@@ -90,10 +90,10 @@ func BenchmarkRBQ_PushPop(b *testing.B) {
 		QT:           wp.RevolvingBucketQueue,
 		SegmentSize:  2048,
 		SegmentCount: 32,
-		PoolCapacity: 64,
+		PoolCapacity: 256,
 		PinWorkers:   true,
 	}
-	q := wp.NewSegmentedQ[int](opts)
+	q := wp.NewSegmentedQ[int](opts, nil)
 	job := wp.Job[int]{Fn: func(int) error { return nil }}
 
 	b.ReportAllocs()

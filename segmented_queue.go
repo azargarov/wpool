@@ -94,7 +94,7 @@ type segmentedQ[T any] struct {
 
 	tail atomic.Pointer[segment[T]]
 
-	pool segmentPool[T]
+	pool segmentPoolProvider[T]
 
 	pageSize uint32
 }
@@ -111,17 +111,19 @@ func mkSegment[T any](segSize uint32) *segment[T] {
 }
 
 // NewSegmentedQ initializes a segmented queue with preallocated segments.
-func NewSegmentedQ[T any](opts Options) *segmentedQ[T] {
+func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmentedQ[T] {
 	q := &segmentedQ[T]{pageSize: opts.SegmentSize}
 
 	capacity := opts.PoolCapacity
 	if capacity <= 0 {
 		capacity = opts.SegmentCount * 2
 	}
-	q.pool.free = make([]*segment[T], 0, capacity)
-	for range opts.SegmentCount {
-		q.pool.free = append(q.pool.free, mkSegment[T](opts.SegmentSize))
+	if spool == nil{
+		q.pool = NewSegmentPool[T](capacity, opts.SegmentCount, opts.SegmentSize)
+	} else {
+		q.pool = spool
 	}
+
 
 	first := q.pool.Get(opts.SegmentSize)
 	atomic.StoreUint32(&first.consumer.head, 0)

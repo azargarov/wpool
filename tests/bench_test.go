@@ -61,7 +61,7 @@ func BenchmarkPool(b *testing.B) {
 func BenchmarkPool_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
 	segmentSize := getenvInt("SEGSIZE", 1024)
-	segmentCount := getenvInt("SEGCOUNT", 8)
+	segmentCount := getenvInt("SEGCOUNT", 32)
 	pinned := getenvInt("PINNED", 0) > 0
 
 	b.Run(
@@ -101,7 +101,7 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, qt wp.QueueType,  p
 		QT:           qt,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 512,
+		PoolCapacity: 2048,
 		PinWorkers:   pinned,
 	}
 
