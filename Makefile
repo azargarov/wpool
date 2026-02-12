@@ -41,7 +41,7 @@ bench-long:
 
 bench-debug:
 	$(DEBUG_FLAGS) go test -tags=debug $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem \
-		-count=1 -cpuprofile $(TEST_OUT)/cpu.out -memprofile $(TEST_OUT)/mem.out -o $(TEST_OUT)/tests.test
+		-count=1 -cpuprofile $(TEST_OUT)/cpu.out -memprofile $(TEST_OUT)/mem.out -o $(TEST_OUT)/tests.test -v
 
 pprof-mem:
 	go tool pprof -http=:8080 $(TEST_OUT)/mem.out
