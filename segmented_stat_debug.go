@@ -2,58 +2,151 @@
 
 package workerpool
 
-import (
+import(
 	"sync/atomic"
+	"fmt"
 )
 
-// Debug statistics are enabled only when built with the "debug" tag.
-//
-// These counters are intended for performance analysis and debugging
-// of queue behavior under load. They are NOT part of the stable API
-// and should not be relied upon in production builds.
-var (
-	allocated  atomic.Int64 // number of newly allocated segments
-	recycled   atomic.Int64 // number of segments returned to the pool
-	consumed   atomic.Int64 // number of segments reused from the pool
-	casMiss    atomic.Int64 // number of failed CAS operations
-	casAttempt atomic.Int64 // number of attempted CAS operations (optional)
-)
-
-// Stats represents a snapshot of internal debug counters.
-//
-// Values are approximate and intended for trend analysis rather
-// than exact accounting.
-type Stats struct {
-	Allocated int64 // segments allocated from the heap
-	Recycled  int64 // segments recycled back into the pool
-	Consumed  int64 // segments taken from the pool
-	CASMiss   int64 // failed CAS attempts under contention
+type segmentPoolMetricsSnapshot struct {
+	FastGetHits     uint64
+	FastGetMisses   uint64
+	FallbackAllocs  uint64
+	FastPutHits     uint64
+	FastPutDrops    uint64
+	RefillSignals   uint64
+	RefillCalls     uint64
+	RefillFromFree  uint64
+	RefillAllocated uint64
 }
 
-func statAllocated() { allocated.Add(1) }
-func statRecycled()  { recycled.Add(1) }
-func statConsumed()  { consumed.Add(1) }
-func statCASMiss()   { casMiss.Add(1) }
+type segmentPoolMetrics struct{
 
-// SnapshotStats returns a point-in-time snapshot of debug statistics.
-func SnapshotStats() Stats {
-	return Stats{
-		Allocated: allocated.Load(),
-		Recycled:  recycled.Load(),
-		Consumed:  consumed.Load(),
-		CASMiss:   casMiss.Load(),
+	fastGetHits     atomic.Uint64
+    fastGetMisses   atomic.Uint64
+    fallbackAllocs  atomic.Uint64
+    fastPutHits     atomic.Uint64
+    fastPutDrops    atomic.Uint64
+    refillSignals   atomic.Uint64
+    refillCalls     atomic.Uint64
+    refillFromFree  atomic.Uint64
+    refillAllocated atomic.Uint64
+
+}
+
+func (m *segmentPoolMetrics) IncFastGetHit() {
+	m.fastGetHits.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncFastGetMiss() {
+	m.fastGetMisses.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncFallbackAlloc() {
+	m.fallbackAllocs.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncFastPutHit() {
+	m.fastPutHits.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncFastPutDrop() {
+	m.fastPutDrops.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncRefillSignal() {
+	m.refillSignals.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncRefillCall() {
+	m.refillCalls.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncRefillFromFree() {
+	m.refillFromFree.Add(1)
+}
+
+func (m *segmentPoolMetrics) IncRefillAllocated() {
+	m.refillAllocated.Add(1)
+}
+
+func (m *segmentPoolMetrics) Reset() {
+	m.fastGetHits.Store(0)
+	m.fastGetMisses.Store(0)
+	m.fallbackAllocs.Store(0)
+	m.fastPutHits.Store(0)
+	m.fastPutDrops.Store(0)
+	m.refillSignals.Store(0)
+	m.refillCalls.Store(0)
+	m.refillFromFree.Store(0)
+	m.refillAllocated.Store(0)
+}
+
+func (s segmentPoolMetricsSnapshot) FastGetHitRatio() float64 {
+	total := s.FastGetHits + s.FastGetMisses
+	if total == 0 {
+		return 0
+	}
+	return float64(s.FastGetHits) / float64(total)
+}
+
+func (s segmentPoolMetricsSnapshot) FastGetTotal() uint64 {
+	return s.FastGetHits + s.FastGetMisses
+}
+
+func (s segmentPoolMetricsSnapshot) SlowPathRate() float64 {
+	total := s.FastGetTotal()
+	if total == 0 {
+		return 0
+	}
+	return float64(s.FallbackAllocs) / float64(total)
+}
+
+func (m *segmentPoolMetrics) Snapshot() segmentPoolMetricsSnapshot {
+	return segmentPoolMetricsSnapshot{
+		FastGetHits:     m.fastGetHits.Load(),
+		FastGetMisses:   m.fastGetMisses.Load(),
+		FallbackAllocs:  m.fallbackAllocs.Load(),
+		FastPutHits:     m.fastPutHits.Load(),
+		FastPutDrops:    m.fastPutDrops.Load(),
+		RefillSignals:   m.refillSignals.Load(),
+		RefillCalls:     m.refillCalls.Load(),
+		RefillFromFree:  m.refillFromFree.Load(),
+		RefillAllocated: m.refillAllocated.Load(),
 	}
 }
 
-// PrintStat prints a human-readable summary of debug statistics.
-//
-// Intended for quick inspection during benchmarks or experiments.
-func PrintStat() {
-	println(
-		"allocated / recycled / consumed / CAS misses :",
-		allocated.Load(),
-		recycled.Load(),
-		consumed.Load(),
-		casMiss.Load(),
+func (s segmentPoolMetricsSnapshot) String() string {
+	totalGets := s.FastGetTotal()
+	totalPuts := s.FastPutHits + s.FastPutDrops
+
+	return fmt.Sprintf(
+ `SegmentPool Metrics:
+  GET:    TotalGets: %d, FastHits: %d, FastMisses: %d, HitRatio: %.2f%%, SlowPathRate    : %.2f%%
+  PUT:    TotalPuts: %d, FastPutHits: %d, FastPutDrops: %d
+  REFILL: RefillSignals: %d, RefillCalls: %d, FromFree: %d, Allocated: %d `,
+		totalGets,
+		s.FastGetHits,
+		s.FastGetMisses,
+		s.FastGetHitRatio()*100,
+		s.SlowPathRate()*100,
+
+		totalPuts,
+		s.FastPutHits,
+		s.FastPutDrops,
+
+		s.RefillSignals,
+		s.RefillCalls,
+		s.RefillFromFree,
+		s.RefillAllocated,
+	)
+}
+
+func (s segmentPoolMetricsSnapshot) CompactString() string {
+	return fmt.Sprintf(
+		"GET hit=%.2f%% slow=%.2f%% | PUT drops=%d | refill alloc=%d",
+		s.FastGetHitRatio()*100,
+		s.SlowPathRate()*100,
+		s.FastPutDrops,
+		s.RefillAllocated,
 	)
 }

@@ -89,6 +89,8 @@ type schedQueue[T any] interface {
 	// has finished processing.
 	OnBatchDone(b Batch[T])
 
+	StatSnapshot()string
+
 	//// MaybeHasWork performs a fast, approximate check
 	//// for whether the queue may contain work.
 	//MaybeHasWork() bool

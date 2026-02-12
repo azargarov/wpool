@@ -1,54 +1,131 @@
 package workerpool
 
 import(
-	"sync"
 )
 
-// segmentPool manages reusable segments to reduce allocation pressure.
 type segmentPool[T any] struct {
-	mu      sync.Mutex
+    pageSize uint32
 
-	maxKeep int64
+    maxKeep int
 	free    []*segment[T]
+
+    // fast paths
+    putCh chan *segment[T]      
+    getCh chan *segment[T]      
+
+ 	refillCh chan struct{}
+
+    // tuning
+    prefetch int 
+
+	metrics *segmentPoolMetrics
 }
 
-// Put returns a detached segment back to the pool.
-func (p *segmentPool[T]) Put(seg *segment[T]) {
-	p.mu.Lock()
-	max := int(p.maxKeep)
-	if max <= 0 {
-		max = cap(p.free)
-	}
-	if len(p.free) < max {
-		p.free = append(p.free, seg)
-	}
-	p.mu.Unlock()
-	statRecycled()
-}
-
-// Get retrieves a segment from the pool or allocates a new one.
-func (p *segmentPool[T]) Get(pageSize uint32) *segment[T] {
-	p.mu.Lock()
-	n := len(p.free)
-	if n == 0 {
-		p.mu.Unlock()
-		return mkSegment[T](pageSize)
-	}
-	seg := p.free[n-1]
-	p.free[n-1] = nil
-	p.free = p.free[:n-1]
-	p.mu.Unlock()
-	statConsumed()
-	return seg
-}
-
-func NewSegmentPool[T any](capacity uint32, segmentCount uint32, segmentSize uint32) segmentPoolProvider[T]{
-    pool := &segmentPool[T]{
-        maxKeep: int64(capacity),
-        free:    make([]*segment[T], 0, capacity),
+func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut int, fastGet int) *segmentPool[T] {
+    if maxKeep <= 0 {
+        maxKeep = max(prefill * 2, 128)
     }
-	for range segmentCount {
-		pool.free = append(pool.free, mkSegment[T](segmentSize))
-	}
-	return pool
+    if prefill < 0 { prefill = 4 }
+    if fastPut <= 0 { fastPut = 1024 }
+    if fastGet <= 0 { fastGet = 1024 }
+
+    p := &segmentPool[T]{
+        pageSize:  pageSize,
+        maxKeep:   maxKeep,
+        free:      make([]*segment[T], 0, maxKeep),
+        putCh:     make(chan *segment[T], fastPut),
+        getCh:     make(chan *segment[T], fastGet),
+
+		refillCh:  make(chan struct{}, 1),
+        prefetch:  256,
+    }
+
+    for i := 0; i < prefill; i++ {
+        p.free = append(p.free, mkSegment[T](pageSize))
+    }
+
+	p.metrics = &segmentPoolMetrics{}
+
+    go p.run()
+    return p
+}
+
+func (p *segmentPool[T]) Put(seg *segment[T]) {
+    if seg == nil {
+        return
+    }
+    select {
+    case p.putCh <- seg:
+		p.metrics.IncFastPutHit()
+    default:
+		p.metrics.IncFastPutDrop()
+    }
+}
+
+func (p *segmentPool[T]) Get(_ uint32) *segment[T] {
+    select {
+    case seg := <-p.getCh:
+		p.metrics.IncFastGetHit()
+        return seg
+    default:
+		p.metrics.IncFastGetMiss()
+    }
+
+    select {
+    case p.refillCh <- struct{}{}:
+		 p.metrics.IncRefillSignal()
+    default:
+    }
+
+    // fallback
+	p.metrics.IncFallbackAlloc()
+    return mkSegment[T](p.pageSize)
+}
+
+func (p *segmentPool[T]) run() {
+
+    refill := func() {
+		p.metrics.IncRefillCall()
+        for i := 0; i < p.prefetch; i++ {
+
+            var seg *segment[T]
+
+            if len(p.free) > 0 {
+                n := len(p.free) - 1
+                seg = p.free[n]
+                p.free[n] = nil
+                p.free = p.free[:n]
+
+				p.metrics.IncRefillFromFree()
+            } else {
+                seg = mkSegment[T](p.pageSize)
+				p.metrics.IncRefillAllocated()
+            }
+
+            select {
+            case p.getCh <- seg:
+            default:
+                if len(p.free) < p.maxKeep {
+                    p.free = append(p.free, seg)
+                }
+                return
+            }
+        }
+    }
+    refill()
+    for {
+        select {
+        case seg := <-p.putCh:
+            if len(p.free) < p.maxKeep {
+                p.free = append(p.free, seg)
+            }
+
+        case <-p.refillCh:
+            refill()
+        }
+    }
+}
+
+func (p *segmentPool[T]) StatSnapshot() string{
+	return p.metrics.Snapshot().String()
 }

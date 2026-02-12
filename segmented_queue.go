@@ -106,7 +106,6 @@ func mkSegment[T any](segSize uint32) *segment[T] {
 		ready: make([]uint32, segSize),
 	}
 	seg.gen.Store(1)
-	statAllocated()
 	return &seg
 }
 
@@ -119,7 +118,7 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 		capacity = opts.SegmentCount * 2
 	}
 	if spool == nil{
-		q.pool = NewSegmentPool[T](capacity, opts.SegmentCount, opts.SegmentSize)
+		q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(capacity), 128, 128) 
 	} else {
 		q.pool = spool
 	}
@@ -135,6 +134,10 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 	q.head.Store(first)
 	q.tail.Store(first)
 	return q
+}
+
+func (rq *segmentedQ[T])StatSnapshot()string{
+	return rq.pool.StatSnapshot()
 }
 
 // Push enqueues a job into the queue.
@@ -169,7 +172,6 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 				seg.refs.Add(-1)
 				return nil
 			}
-			statCASMiss()
 		}
 
 		next := seg.next.Load()

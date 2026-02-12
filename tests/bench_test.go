@@ -60,7 +60,7 @@ func BenchmarkPool(b *testing.B) {
 
 func BenchmarkPool_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
-	segmentSize := getenvInt("SEGSIZE", 1024)
+	segmentSize := getenvInt("SEGSIZE", 4096)
 	segmentCount := getenvInt("SEGCOUNT", 32)
 	pinned := getenvInt("PINNED", 0) > 0
 
@@ -73,8 +73,8 @@ func BenchmarkPool_single(b *testing.B) {
 }
 func BenchmarkPool_segmented_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
-	segmentSize := getenvInt("SEGSIZE", 4096)
-	segmentCount := getenvInt("SEGCOUNT", 2)
+	segmentSize := getenvInt("SEGSIZE", 2048)
+	segmentCount := getenvInt("SEGCOUNT", 4)
 	pinned := getenvInt("PINNED", 0) > 0
 
 	b.Run(
@@ -101,31 +101,31 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, qt wp.QueueType,  p
 		QT:           qt,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 2048,
+		PoolCapacity: 4096,
 		PinWorkers:   pinned,
 	}
 
 	pool := getPool(opts)
 	defer func() {
 		pool.Shutdown(context.Background())
-		wp.PrintStat()
-	}()
-
-	var executed atomic.Int64
-	var submitted atomic.Int64
-
-	job := wp.Job[int]{Fn: func(int) error {
-		executed.Add(1)
-		for i := range(1){
-			_ = i * i
-		}
-		return nil
-	}}
-
-	if os.Getenv("OBSERVER") == "1" {
-		done := make(chan struct{})
-		defer close(done)
-		go observer(5*time.Second, &executed, &submitted, done, pool)
+		}()
+		
+		var executed atomic.Int64
+		var submitted atomic.Int64
+		
+		job := wp.Job[int]{Fn: func(int) error {
+			executed.Add(1)
+			for i := range(1){
+				_ = i * i
+			}
+			return nil
+		}}
+		
+		if os.Getenv("OBSERVER") == "1" {
+			done := make(chan struct{})
+			defer close(done)
+			go observer(5*time.Second, &executed, &submitted, done, pool)
+			b.Log(pool.StatSnapshot())
 	}
 
 	b.ResetTimer()

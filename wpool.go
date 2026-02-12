@@ -81,6 +81,10 @@ type Pool[T any, M MetricsPolicy] struct {
 	OnJobError     ErrorHandler
 }
 
+func (p *Pool[T, M]) StatSnapshot() string{
+	return p.queue.StatSnapshot()
+}
+
 // GetIdleLen returns the number of currently idle workers.
 func (p *Pool[T, M]) GetIdleLen() int64 {
 	return int64(len(p.idleWorkers))

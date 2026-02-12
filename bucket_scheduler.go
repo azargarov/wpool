@@ -50,6 +50,7 @@ type RevolvingBucketQ[T any] struct {
 
 }
 
+
 type RevolvingBucketOptions struct {
 	SegmentSize  uint32
 	SegmentCount uint32
@@ -58,18 +59,21 @@ type RevolvingBucketOptions struct {
 
 func NewRevolvingBucketQ[T any](opts Options) *RevolvingBucketQ[T] {
 	rq := &RevolvingBucketQ[T]{}
-
-	rq.pool =  NewSegmentPool[T](opts.PoolCapacity, opts.SegmentCount, opts.SegmentSize) 
-
+	
+	rq.pool =  NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(opts.PoolCapacity), 2048, 2048)
 	for i := range BucketCount {
 		rq.buckets[i].q = NewSegmentedQ(opts, rq.pool)
 	}
-
+	
 	rq.state.base.Store(0)
 	rq.state.nonEmptyMask.Store(0)
 	rq.hasWork.Store(false)
-
+	
 	return rq
+}
+
+func (rq *RevolvingBucketQ[T])StatSnapshot()string{
+	return rq.pool.StatSnapshot()
 }
 
 func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
