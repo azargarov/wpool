@@ -1,6 +1,7 @@
 package workerpool
 
-import(
+import (
+
 )
 
 type segmentPool[T any] struct {
@@ -51,34 +52,50 @@ func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut in
 }
 
 func (p *segmentPool[T]) Put(seg *segment[T]) {
-    if seg == nil {
+
+    if seg == nil { return }
+
+    select {
+    case p.getCh <- seg:
+        p.metrics.IncFastPutHit()
         return
+    default:
+        p.metrics.IncFastPutDrop()
     }
+
     select {
     case p.putCh <- seg:
-		p.metrics.IncFastPutHit()
+        p.metrics.IncFastPutHit()
     default:
-		p.metrics.IncFastPutDrop()
     }
 }
 
 func (p *segmentPool[T]) Get(_ uint32) *segment[T] {
     select {
     case seg := <-p.getCh:
-		p.metrics.IncFastGetHit()
+        p.metrics.IncFastGetHit()
         return seg
     default:
-		p.metrics.IncFastGetMiss()
+        p.metrics.IncFastGetMiss()
     }
 
     select {
     case p.refillCh <- struct{}{}:
-		 p.metrics.IncRefillSignal()
+        p.metrics.IncRefillSignal()
     default:
     }
 
-    // fallback
-	p.metrics.IncFallbackAlloc()
+    for range 8 {
+        select {
+        case seg := <-p.getCh:
+            p.metrics.IncFastGetHit() 
+            return seg
+        default:
+			//runtime.Gosched()
+        }
+    }
+
+    p.metrics.IncFallbackAlloc()
     return mkSegment[T](p.pageSize)
 }
 

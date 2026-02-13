@@ -121,7 +121,7 @@ func (s segmentPoolMetricsSnapshot) String() string {
 
 	return fmt.Sprintf(
  `SegmentPool Metrics:
-  GET:    TotalGets: %d, FastHits: %d, FastMisses: %d, HitRatio: %.2f%%, SlowPathRate    : %.2f%%
+  GET:    TotalGets: %d, FastHits: %d, FastMisses: %d, HitRatio: %.2f%%, SlowPathRate: %.2f%%
   PUT:    TotalPuts: %d, FastPutHits: %d, FastPutDrops: %d
   REFILL: RefillSignals: %d, RefillCalls: %d, FromFree: %d, Allocated: %d `,
 		totalGets,

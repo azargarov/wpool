@@ -38,6 +38,7 @@ func getPool(opt wp.Options) *wp.Pool[int, *wp.NoopMetrics] {
 }
 
 func BenchmarkPool(b *testing.B) {
+	segSize := 4096
 	cases := []struct {
 		name         string
 		workers      int
@@ -45,10 +46,10 @@ func BenchmarkPool(b *testing.B) {
 		segmentCount int
 		pinned       bool
 	}{
-		{"W=GOMAX_S,C=8", runtime.GOMAXPROCS(0), 1024, 8, false},
-		{"W=GOMAX_S,C=16", runtime.GOMAXPROCS(0), 1024, 16, false},
-		{"W=2xGOMAX_S,C=32", runtime.GOMAXPROCS(0) , 1024, 32, false},
-		{"W=GOMAX_S,C=32,PINNED", runtime.GOMAXPROCS(0) , 1024, 32, true},
+		{"W=GOMAX_S,C=8", runtime.GOMAXPROCS(0), segSize, 8, false},
+		{"W=GOMAX_S,C=16", runtime.GOMAXPROCS(0), segSize, 16, false},
+		{"W=2xGOMAX_S,C=32", runtime.GOMAXPROCS(0) , segSize, 32, false},
+		{"W=GOMAX_S,C=32,PINNED", runtime.GOMAXPROCS(0) , segSize, 32, true},
 	}
 
 	for _, tc := range cases {
@@ -61,7 +62,7 @@ func BenchmarkPool(b *testing.B) {
 func BenchmarkPool_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
 	segmentSize := getenvInt("SEGSIZE", 4096)
-	segmentCount := getenvInt("SEGCOUNT", 32)
+	segmentCount := getenvInt("SEGCOUNT", 128)
 	pinned := getenvInt("PINNED", 0) > 0
 
 	b.Run(
@@ -72,9 +73,9 @@ func BenchmarkPool_single(b *testing.B) {
 	)
 }
 func BenchmarkPool_segmented_single(b *testing.B) {
-	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
+	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) *4 
 	segmentSize := getenvInt("SEGSIZE", 2048)
-	segmentCount := getenvInt("SEGCOUNT", 4)
+	segmentCount := getenvInt("SEGCOUNT", 1024)
 	pinned := getenvInt("PINNED", 0) > 0
 
 	b.Run(
@@ -101,7 +102,7 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, qt wp.QueueType,  p
 		QT:           qt,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 4096,
+		PoolCapacity: 1024,
 		PinWorkers:   pinned,
 	}
 
@@ -125,38 +126,38 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, qt wp.QueueType,  p
 			done := make(chan struct{})
 			defer close(done)
 			go observer(5*time.Second, &executed, &submitted, done, pool)
-			b.Log(pool.StatSnapshot())
-	}
-
-	b.ResetTimer()
-	start := time.Now()
-	//i:= 1
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			prio := (wp.JobPriority)(rand.Intn(62) + 1)
-			job.SetPriority(prio)
-			if err := pool.Submit(job); err != nil {
-				panic(err)
-			}
-			submitted.Add(1)
 		}
-	})
-
-	// Wait for all submitted jobs to complete.
-	for executed.Load() < submitted.Load() {
-		time.Sleep(100 * time.Microsecond)
-	}
-
-	elapsed := time.Since(start)
-	mps := float64(executed.Load()) / elapsed.Seconds() / 1e6
-	b.ReportMetric(mps, "Mjobs/sec")
-
-	b.Logf(
-		"MyPoolBench → %.2f Mjobs/sec in %.2fs, jobs total: %d",
-		mps,
-		elapsed.Seconds(),
-		executed.Load(),
-	)
+		
+		b.ResetTimer()
+		start := time.Now()
+		//i:= 1
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				prio := (wp.JobPriority)(rand.Intn(62) + 1)
+				job.SetPriority(prio)
+				if err := pool.Submit(job); err != nil {
+					panic(err)
+				}
+				submitted.Add(1)
+			}
+		})
+		
+		// Wait for all submitted jobs to complete.
+		for executed.Load() < submitted.Load() {
+			time.Sleep(100 * time.Microsecond)
+		}
+		
+		elapsed := time.Since(start)
+		mps := float64(executed.Load()) / elapsed.Seconds() / 1e6
+		b.ReportMetric(mps, "Mjobs/sec")
+		
+		b.Logf(
+			"MyPoolBench → %.2f Mjobs/sec in %.2fs, jobs total: %d",
+			mps,
+			elapsed.Seconds(),
+			executed.Load(),
+		)
+	b.Log(pool.StatSnapshot())
 }
 
 func observer(

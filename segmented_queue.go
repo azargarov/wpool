@@ -15,6 +15,8 @@ const (
 	// It should be large enough to amortize allocation costs but
 	// small enough to fit comfortably in cache.
 	DefaultSegmentSize = 4096
+
+	DefaultFastPutGet = 1024
 )
 
 // DefaultSegmentCount defines the default number of preallocated segments.
@@ -118,7 +120,7 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 		capacity = opts.SegmentCount * 2
 	}
 	if spool == nil{
-		q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(capacity), 128, 128) 
+		q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(capacity), DefaultFastPutGet, DefaultFastPutGet) 
 	} else {
 		q.pool = spool
 	}
