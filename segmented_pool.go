@@ -1,7 +1,7 @@
 package workerpool
 
 import (
-
+    "runtime"
 )
 
 type segmentPool[T any] struct {
@@ -104,7 +104,7 @@ func (p *segmentPool[T]) Get() *segment[T] {
             p.metrics.IncFastGetHit() 
             return seg
         default:
-			//runtime.Gosched()
+            runtime.Gosched()
         }
     }
 
