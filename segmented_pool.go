@@ -20,6 +20,18 @@ type segmentPool[T any] struct {
     prefetch int 
 
 	metrics *segmentPoolMetrics
+
+    done chan struct{}
+}
+
+func (p *segmentPool[T]) adaptivePrefetch() int {
+    capacity := cap(p.getCh)
+    current := len(p.getCh)
+    
+    if current < capacity/4 {
+        return p.prefetch
+    }
+    return p.prefetch >> 1
 }
 
 func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut int, fastGet int) *segmentPool[T] {
@@ -33,6 +45,7 @@ func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut in
     p := &segmentPool[T]{
         pageSize:  pageSize,
         maxKeep:   maxKeep,
+        done: make(chan struct{}),
         free:      make([]*segment[T], 0, maxKeep),
         putCh:     make(chan *segment[T], fastPut),
         getCh:     make(chan *segment[T], fastGet),
@@ -41,7 +54,7 @@ func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut in
         prefetch:  256,
     }
 
-    for i := 0; i < prefill; i++ {
+    for range(prefill) {
         p.free = append(p.free, mkSegment[T](pageSize))
     }
 
@@ -103,7 +116,7 @@ func (p *segmentPool[T]) run() {
 
     refill := func() {
 		p.metrics.IncRefillCall()
-        for i := 0; i < p.prefetch; i++ {
+        for i := 0; i < p.adaptivePrefetch(); i++ {
 
             var seg *segment[T]
 
@@ -121,6 +134,8 @@ func (p *segmentPool[T]) run() {
 
             select {
             case p.getCh <- seg:
+            case <-p.done:
+                return
             default:
                 if len(p.free) < p.maxKeep {
                     p.free = append(p.free, seg)
@@ -132,6 +147,8 @@ func (p *segmentPool[T]) run() {
     refill()
     for {
         select {
+        case <-p.done:
+            return
         case seg := <-p.putCh:
             if len(p.free) < p.maxKeep {
                 p.free = append(p.free, seg)
@@ -145,4 +162,8 @@ func (p *segmentPool[T]) run() {
 
 func (p *segmentPool[T]) StatSnapshot() string{
 	return p.metrics.Snapshot().String()
+}
+
+func (p *segmentPool[T]) Close() {
+    close(p.done)
 }
