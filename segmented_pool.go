@@ -70,7 +70,7 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
     }
 }
 
-func (p *segmentPool[T]) Get(_ uint32) *segment[T] {
+func (p *segmentPool[T]) Get() *segment[T] {
     select {
     case seg := <-p.getCh:
         p.metrics.IncFastGetHit()

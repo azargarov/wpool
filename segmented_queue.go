@@ -126,7 +126,7 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 	}
 
 
-	first := q.pool.Get(opts.SegmentSize)
+	first := q.pool.Get()
 	atomic.StoreUint32(&first.consumer.head, 0)
 	atomic.StoreUint32(&first.producer.reserve, 0)
 	first.next.Store(nil)
@@ -178,7 +178,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 
 		next := seg.next.Load()
 		if next == nil {
-			newSeg := q.pool.Get(q.pageSize)
+			newSeg := q.pool.Get()
 			if seg.next.CompareAndSwap(nil, newSeg) {
 				next = newSeg
 			} else {
