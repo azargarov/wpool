@@ -270,15 +270,19 @@ func (q *segmentedQ[T]) OnBatchDone(b Batch[T]) {
 // tryAddRef attempts to acquire a reference to a segment
 // unless it is already detached.
 func (s *segment[T]) tryAddRef() bool {
-	if s.detached.Load() != 0 {
-		return false
-	}
-	s.refs.Add(1)
-	if s.detached.Load() != 0 {
-		s.refs.Add(-1)
-		return false
-	}
-	return true
+    for {
+        r := s.refs.Load()
+        if r < 0 {
+            return false
+        }
+        if s.refs.CompareAndSwap(r, r+1) {
+            if s.detached.Load() != 0 {
+                s.refs.Add(-1)
+                return false
+            }
+            return true
+        }
+    }
 }
 
 // tryRecycle returns a detached segment to the pool
