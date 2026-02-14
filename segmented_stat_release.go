@@ -9,6 +9,7 @@ func (m *segmentPoolMetrics) IncFastGetHit() {}
 func (m *segmentPoolMetrics) IncFastGetMiss() {}
 func (m *segmentPoolMetrics) IncFallbackAlloc() {}
 func (m *segmentPoolMetrics) IncFastPutHit() {}
+func (m *segmentPoolMetrics) IncFastPutToBuf() {}
 func (m *segmentPoolMetrics) IncFastPutDrop() {}
 func (m *segmentPoolMetrics) IncRefillSignal() {}
 func (m *segmentPoolMetrics) IncRefillCall() {}

@@ -12,6 +12,7 @@ type segmentPoolMetricsSnapshot struct {
 	FastGetMisses   uint64
 	FallbackAllocs  uint64
 	FastPutHits     uint64
+	FastPutToBuf    uint64
 	FastPutDrops    uint64
 	RefillSignals   uint64
 	RefillCalls     uint64
@@ -25,6 +26,7 @@ type segmentPoolMetrics struct{
     fastGetMisses   atomic.Uint64
     fallbackAllocs  atomic.Uint64
     fastPutHits     atomic.Uint64
+	fastPutToBuf    atomic.Uint64
     fastPutDrops    atomic.Uint64
     refillSignals   atomic.Uint64
     refillCalls     atomic.Uint64
@@ -48,7 +50,9 @@ func (m *segmentPoolMetrics) IncFallbackAlloc() {
 func (m *segmentPoolMetrics) IncFastPutHit() {
 	m.fastPutHits.Add(1)
 }
-
+func (m *segmentPoolMetrics) IncFastPutToBuf() {
+	m.fastPutToBuf.Add(1)
+}
 func (m *segmentPoolMetrics) IncFastPutDrop() {
 	m.fastPutDrops.Add(1)
 }
@@ -69,11 +73,13 @@ func (m *segmentPoolMetrics) IncRefillAllocated() {
 	m.refillAllocated.Add(1)
 }
 
+
 func (m *segmentPoolMetrics) Reset() {
 	m.fastGetHits.Store(0)
 	m.fastGetMisses.Store(0)
 	m.fallbackAllocs.Store(0)
 	m.fastPutHits.Store(0)
+	m.fastPutToBuf.Store(0)
 	m.fastPutDrops.Store(0)
 	m.refillSignals.Store(0)
 	m.refillCalls.Store(0)
@@ -106,7 +112,8 @@ func (m *segmentPoolMetrics) Snapshot() segmentPoolMetricsSnapshot {
 		FastGetHits:     m.fastGetHits.Load(),
 		FastGetMisses:   m.fastGetMisses.Load(),
 		FallbackAllocs:  m.fallbackAllocs.Load(),
-		FastPutHits:     m.fastPutHits.Load(),
+		FastPutHits:     m.fastPutHits.Load(),		
+		FastPutToBuf:    m.fastPutToBuf.Load(),
 		FastPutDrops:    m.fastPutDrops.Load(),
 		RefillSignals:   m.refillSignals.Load(),
 		RefillCalls:     m.refillCalls.Load(),
@@ -122,7 +129,7 @@ func (s segmentPoolMetricsSnapshot) String() string {
 	return fmt.Sprintf(
  `SegmentPool Metrics:
   GET:    TotalGets: %d, FastHits: %d, FastMisses: %d, HitRatio: %.2f%%, SlowPathRate: %.2f%%
-  PUT:    TotalPuts: %d, FastPutHits: %d, FastPutDrops: %d
+  PUT:    TotalPuts: %d, FastPutHits: %d,FastPutToBuf: %d ,FastPutDrops: %d
   REFILL: RefillSignals: %d, RefillCalls: %d, FromFree: %d, Allocated: %d `,
 		totalGets,
 		s.FastGetHits,
@@ -132,6 +139,7 @@ func (s segmentPoolMetricsSnapshot) String() string {
 
 		totalPuts,
 		s.FastPutHits,
+		s.FastPutToBuf,
 		s.FastPutDrops,
 
 		s.RefillSignals,

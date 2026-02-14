@@ -73,13 +73,13 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
         p.metrics.IncFastPutHit()
         return
     default:
-        p.metrics.IncFastPutDrop()
     }
-
+    
     select {
     case p.putCh <- seg:
-        p.metrics.IncFastPutHit()
+        p.metrics.IncFastPutToBuf()
     default:
+        p.metrics.IncFastPutDrop()
     }
 }
 
