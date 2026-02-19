@@ -38,7 +38,7 @@ func getPool(opt wp.Options) *wp.Pool[int, *wp.NoopMetrics] {
 }
 
 func BenchmarkPool(b *testing.B) {
-	segSize := 4096
+	segSize := getenvInt("SEGSIZE", 4096)
 	cases := []struct {
 		name         string
 		workers      int
@@ -62,7 +62,7 @@ func BenchmarkPool(b *testing.B) {
 func BenchmarkPool_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) 
 	segmentSize := getenvInt("SEGSIZE", 4096)
-	segmentCount := getenvInt("SEGCOUNT", 128)
+	segmentCount := getenvInt("SEGCOUNT", 1024)
 	pinned := getenvInt("PINNED", 0) > 0
 
 	b.Run(
@@ -75,7 +75,7 @@ func BenchmarkPool_single(b *testing.B) {
 func BenchmarkPool_segmented_single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0)) *4 
 	segmentSize := getenvInt("SEGSIZE", 2048)
-	segmentCount := getenvInt("SEGCOUNT", 1024)
+	segmentCount := getenvInt("SEGCOUNT", 32)
 	pinned := getenvInt("PINNED", 0) > 0
 
 	b.Run(
@@ -102,7 +102,7 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, qt wp.QueueType,  p
 		QT:           qt,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 1024,
+		PoolCapacity: 4096,
 		PinWorkers:   pinned,
 	}
 
@@ -132,10 +132,12 @@ func PoolBench(b *testing.B, workers, segSize, segCount int, qt wp.QueueType,  p
 		start := time.Now()
 		//i:= 1
 		b.RunParallel(func(pb *testing.PB) {
+			r := rand.New(rand.NewSource(time.Now().UnixNano()))
 			for pb.Next() {
-				prio := (wp.JobPriority)(rand.Intn(62) + 1)
-				job.SetPriority(prio)
-				if err := pool.Submit(job); err != nil {
+				prio := (wp.JobPriority)(r.Intn(62) + 1)
+				j := job
+				j.SetPriority(prio)
+				if err := pool.Submit(j); err != nil {
 					panic(err)
 				}
 				submitted.Add(1)
