@@ -156,6 +156,7 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 	p.stopOnce.Do(func() {
 		p.shutdown.Store(true)
 		close(p.doneCh)
+		p.queue.Close()
 	})
 
 	select {
@@ -337,7 +338,3 @@ func (p *Pool[T, M]) ActiveWorkers() int {
 func (p *Pool[T, M]) setWorkerState(id int, state bool) {
 	p.workersActive[id].Store(state)
 }
-
-//func (p *Pool[T, M]) getQueue() schedQueue[T] {
-//	return p.queue
-//}
