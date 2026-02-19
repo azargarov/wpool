@@ -52,7 +52,7 @@ Zero-value default.
 Characteristics:
 
 - Lock-free segmented FIFO
-- Multiple producers (MPMC safe)
+- Multi-producer, coordinated single-consumer batch draining
 - Batch-based draining
 - Ignores submitted priority
 - Optimized for throughput
