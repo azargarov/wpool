@@ -25,16 +25,15 @@ type bucket[T any] struct {
 }
 
 type revolveState struct {
-	// base defines which priority is currently mapped to bucket 0.
-	// Logical priority p maps to physical bucket (p - base) & 63.
-	base atomic.Uint64
+	// highestPriorityBucket defines which priority is currently mapped to bucket 0.
+	// Logical priority p maps to physical bucket (p - highestPriorityBucket) & 63.
+	highestPriorityBucket atomic.Uint64
 	_    cachePad
 
 	// nonEmptyMask tracks which physical buckets have work.
 	// Bit i == 1 means buckets[i] may have work.
 	nonEmptyMask atomic.Uint64
 	_    cachePad
-
 }
 
 type RevolvingBucketQ[T any] struct {
@@ -47,7 +46,6 @@ type RevolvingBucketQ[T any] struct {
 	rotateMu sync.Mutex
 
 	pool segmentPoolProvider[T]
-
 }
 
 
@@ -65,7 +63,7 @@ func NewRevolvingBucketQ[T any](opts Options) *RevolvingBucketQ[T] {
 		rq.buckets[i].q = NewSegmentedQ(opts, rq.pool)
 	}
 	
-	rq.state.base.Store(0)
+	rq.state.highestPriorityBucket.Store(0)
 	rq.state.nonEmptyMask.Store(0)
 	rq.hasWork.Store(false)
 	
@@ -76,6 +74,10 @@ func (rq *RevolvingBucketQ[T])StatSnapshot()string{
 	return rq.pool.StatSnapshot()
 }
 
+func(rq *RevolvingBucketQ[T])Close(){
+	rq.pool.Close()
+}
+
 func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
 
 	p := job.GetPriority()
@@ -83,8 +85,8 @@ func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
 		return ErrInvalidPriority
 	}
 
-	base := uint8(rq.state.base.Load() & 63)
-    idx := (base + uint8(p)) & 63 
+	highestPriorityBucket := uint8(rq.state.highestPriorityBucket.Load() & 63)
+    idx := (highestPriorityBucket + uint8(p)) & 63 
 
 	err := rq.buckets[idx].q.Push(job)
 	if err != nil {
@@ -96,11 +98,15 @@ func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
 
 	// Mark bucket as non-empty
 	mask := uint64(1) << idx
-	for {
-		old := rq.state.nonEmptyMask.Load()
-		if rq.state.nonEmptyMask.CompareAndSwap(old, old|mask) {
-			break
-		}
+
+	for attempts := range 512 {
+	    old := rq.state.nonEmptyMask.Load()
+	    if rq.state.nonEmptyMask.CompareAndSwap(old, old|mask) {
+	        break
+	    }
+	    if attempts > 10 {
+	        runtime.Gosched()
+	    }
 	}
 	rq.hasWork.Store(true)
 
@@ -115,22 +121,24 @@ func (rq *RevolvingBucketQ[T]) BatchPop() (Batch[T], bool) {
     	rq.hasWork.Store(true) 
 	}
 
+	retries := 0
 	for {
-		base := uint8(rq.state.base.Load() & 63)
-		batch, ok := rq.buckets[base].q.BatchPop()
+		highestPriorityBucket := uint8(rq.state.highestPriorityBucket.Load() & 63)
+		batch, ok := rq.buckets[highestPriorityBucket].q.BatchPop()
 		if ok {
-			batch.Meta = base
+			batch.Meta = highestPriorityBucket
 			//debug
-			schedDbgIncPops(base)
+			schedDbgIncPops(highestPriorityBucket)
 			schedDbgAddTotalPops(uint64(len(batch.Jobs)))
 
 			return batch, true
 		}
 		// debug
-		schedDbgIncPopMisses(base)
+		schedDbgIncPopMisses(highestPriorityBucket)
 
-		if rq.buckets[base].q.MaybeHasWork() {
+		if rq.buckets[highestPriorityBucket].q.MaybeHasWork() && retries < 3 {
 			// debug
+			retries ++
 			schedDbgIncRotateAborts()
 		    runtime.Gosched()
 		    continue
@@ -143,41 +151,35 @@ func (rq *RevolvingBucketQ[T]) BatchPop() (Batch[T], bool) {
 }
 
 func (rq *RevolvingBucketQ[T]) rotate() bool {
-	// debug
-	schedDbgIncRotateCalls()
-    rq.rotateMu.Lock()
-    defer rq.rotateMu.Unlock()
-
     for {
-        base := uint8(rq.state.base.Load() & 63)
-        old := rq.state.nonEmptyMask.Load()
-
-        cleared := old &^ (uint64(1) << base)
-
+        currentBase := uint8(rq.state.highestPriorityBucket.Load() & 63)
+		old := rq.state.nonEmptyMask.Load()
+        mask := old//rq.state.nonEmptyMask.Load()
+        
+        // Clear current bucket bit
+        cleared := mask &^ (uint64(1) << currentBase)
+        
         if cleared == 0 {
-            if rq.state.nonEmptyMask.CompareAndSwap(old, 0) {
-                rq.hasWork.Store(false)
-				// debug
-				schedDbgIncMaskClears()
-                return false
-            }
-            continue
+            // No work available
+            rq.state.nonEmptyMask.CompareAndSwap(mask, 0)
+            rq.hasWork.Store(false)
+            return false
         }
-
+        
+        // Find next bucket
         next := uint8(bits.TrailingZeros64(cleared))
         if next >= 64 {
             return false
         }
 
         if rq.state.nonEmptyMask.CompareAndSwap(old, cleared) {
-            rq.state.base.Store(uint64(next))
+            rq.state.highestPriorityBucket.Store(uint64(next))
 			// debug
 			schedDbgIncRotateMoves()
             return true
         }
     }
 }
-
 func (rq *RevolvingBucketQ[T]) OnBatchDone(b Batch[T]) {
 
 	bucket, ok := b.Meta.(uint8)
@@ -190,7 +192,11 @@ func (rq *RevolvingBucketQ[T]) OnBatchDone(b Batch[T]) {
 // Len returns an approximate number of jobs in the queue.
 // Currently unimplemented.
 func (rq *RevolvingBucketQ[T])  Len() int { 
-    return 0
+	total := 0
+    for i := range rq.buckets {
+        total += rq.buckets[i].q.Len()
+    }
+    return total
 }
 
 // MaybeHasWork performs a fast, approximate check for available work.

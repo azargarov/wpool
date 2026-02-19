@@ -58,11 +58,6 @@ func schedDbgIncRotateCalls(){
 }
 func  ShedDumpStats(){ //base, mask uint64) {
 
-    //fmt.Printf(
-    //    "RBQ base=%d mask=%064b hasWork=%v\n",
-    //    base, mask, rq.hasWork.Load(),
-    //)
-
     fmt.Printf(
         "rotates: calls=%d moves=%d aborts=%d clears=%d totalPushes=%d totalPops=%d\n",
         schedDbg.sched.rotateCalls.Load(),
