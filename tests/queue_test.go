@@ -4,6 +4,7 @@ import (
 	wp "github.com/azargarov/wpool"
 	"runtime"
 	"testing"
+	"sync"
 )
 
 func BenchmarkSegmentedQueue_PushOnly(b *testing.B) {
@@ -106,3 +107,47 @@ func BenchmarkRBQ_PushPop(b *testing.B) {
 		}
 	}
 }
+
+func TestSegmentedQ_ABA(t *testing.T) {
+    q := wp.NewSegmentedQ[int](wp.Options{SegmentSize: 4}, nil)
+    
+    var wg sync.WaitGroup
+    errors := make(chan error, 100)
+    
+    // Aggressive Push/Pop/Recycle cycle
+    for i := range 100 {
+        wg.Add(1)
+        go func(id int) {
+            defer wg.Done()
+            for j := range 10000 {
+                if err := q.Push(wp.Job[int]{Payload: id*10000 + j}); err != nil {
+                    errors <- err
+                    return
+                }
+            }
+        }(i)
+    }
+    
+    for range 50 {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for range 20000 {
+                batch, ok := q.BatchPop()
+                if ok {
+                    q.OnBatchDone(batch)
+                }
+                runtime.Gosched()
+            }
+        }()
+    }
+    
+    wg.Wait()
+    close(errors)
+    
+    for err := range errors {
+        t.Fatal(err)
+    }
+}
+
+
