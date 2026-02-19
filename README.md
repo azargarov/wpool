@@ -1,213 +1,104 @@
-# workerpool — High-Performance Batch Worker Pool for Go
 
-`workerpool` is a **high-throughput, bounded-concurrency worker pool** for Go.
-It is built around a **lock-free segmented FIFO queue** and **batch-based scheduling**
-to minimize contention and allocation overhead under load.
+# wpool — a Worker Pool for Go
 
-It is designed for workloads where:
-- job execution is cheap,
-- submission rate is high,
-- contention must be minimized,
-- memory allocation must be predictable.
+`wpool` is a bounded-concurrency worker pool for Go.
+
+It separates **execution** from **scheduling policy**, allowing different queue
+strategies (FIFO or priority-based) to be plugged into the same execution engine.
 
 Module:
 
-```
-github.com/azargarov/wpool
-```
+    github.com/azargarov/wpool
 
-## Performance at a Glance
-
-**Measured on**: AMD Ryzen 7 8845HS, Go 1.22, Linux  
-**Configuration**: `Workers = GOMAXPROCS`, SegmentSize = 4096, SegmentCount = auto
-
-| Scenario                              | Result |
-|--------------------------------------|--------|
-| Steady-state throughput              | **~19.7 M jobs/sec** |
-| Scheduler + queue + minimal job cost | **~50 ns/op** |
-| Allocations per operation            | **0 allocs/op** |
-| Queue type                           | Lock-free segmented FIFO |
-| Producers / consumers                | MPMC safe |
-
-Benchmark excerpt:
-
-```
-BenchmarkPool/W=GOMAX_S,C=128-16
-22668182 ops · 50.7 ns/op · 19.73 Mjobs/sec · 0 allocs/op
-```
-
-These numbers reflect **scheduler + queue overhead only** with minimal job bodies.
-Actual throughput depends on job cost, segment sizing, and CPU topology.
 
 ---
 
-## Core Design
+## Design Philosophy
 
-At its core, `workerpool` combines:
+This project evolved through iterative refinement:
 
-- A **lock-free segmented queue** (MPMC)
-- **Batch draining** instead of per-job wakeups
-- **Bounded concurrency** with a fixed worker set
-- **Minimal synchronization** between producers and consumers
-- **Explicit memory reuse** via a segment pool
+- Started as a simple worker pool
+- Improved batching
+- Introduced lock-free segmented queue
+- Added pluggable scheduling
+- Implemented Revolving Bucket Queue (RBQ) with aging
 
-The queue is optimized to keep producers and consumers mostly independent, reducing cache-line contention and CAS pressure.
-
----
-
-## Features
-
-- **Bounded concurrency**
-  - Fixed number of worker goroutines
-  - No unbounded goroutine spawning
-- **Lock-free segmented FIFO queue**
-  - Multiple producers
-  - Batch-based consumption
-- **Batch scheduling**
-  - Workers process jobs in batches for cache efficiency
-  - Reduces wakeups and atomic traffic
-- **Explicit memory reuse**
-  - Preallocated queue segments
-  - Segment recycling with generation counters
-- **Context-aware jobs**
-  - Submission respects `context.Context`
-- **Panic-safe execution**
-  - Workers are isolated from job panics
-- **Graceful shutdown**
-  - Deadline-aware draining
-- **Low-overhead metrics hook**
-  - Metrics policy is injected, not hardcoded
-- **Optional CPU pinning**
-  - Linux-only, workload-dependent
+The result is a policy-extensible execution engine.
 
 ---
 
-## Installation
+## Architecture Overview
 
-```bash
-go get github.com/azargarov/wpool
-```
-
----
-
-## Quick Start
+The pool depends on a minimal scheduling interface:
 
 ```go
-package main
-
-import (
-	"context"
-	"fmt"
-
-	wp "github.com/azargarov/wpool"
-)
-
-func main() {
-	pool := wp.NewPool(
-		wp.NoopMetrics{},
-		wp.WithWorkers(4),
-		wp.WithSegmentSize(4096),
-		wp.WithSegmentCount(64),
-	)
-
-	defer pool.Stop()
-
-	_ = pool.Submit(wp.Job[int]{
-		Payload: 42,
-		Ctx:     context.Background(),
-		Fn: func(n int) error {
-			fmt.Println("processing", n)
-			return nil
-		},
-	}, 0)
+type schedQueue[T any] interface {
+    Push(job Job[T]) error
+    BatchPop() (Batch[T], bool)
+    OnBatchDone(b Batch[T])
+    StatSnapshot() string  // for debuggin reason
+    Close()
 }
 ```
 
+Execution logic is independent of scheduling policy.
+
 ---
 
-## Job Model
+## Default Scheduler: SegmentedQueue (FIFO)
+
+Zero-value default.
+
+Characteristics:
+
+- Lock-free segmented FIFO
+- Multiple producers (MPMC safe)
+- Batch-based draining
+- Ignores submitted priority
+- Optimized for throughput
+- 0 allocs in hot path
+
+If `Options.QT` is not set, FIFO is used.
+
+---
+
+## Optional Scheduler: RevolvingBucketQueue (RBQ)
+
+RBQ must be explicitly enabled:
 
 ```go
-type Job[T any] struct {
-	Payload     T
-	Fn          func(T) error
-	Ctx         context.Context
-	CleanupFunc func()
-}
+opts.QT = wp.RevolvingBucketQueue
 ```
 
-- `Ctx` is checked before execution
-- `CleanupFunc` is guaranteed to run after execution
-- Jobs are dequeued in FIFO order within the scheduler queue
+### RBQ Model
 
-> Note: `basePrio` is currently unused by the default queue and exists as a
-> forward-compatible hook for future schedulers.
+- 64 priority buckets (0–63)
+- Bucket 0 is the active bucket
+- After draining bucket 0, rotation occurs
+- Priority `p` means eligibility after `p` rotations
+- Aging is implicit via rotation
+- Starvation is prevented
 
----
+Semantics:
 
-## Queue Implementation
+- Lower bucket index = higher effective priority
+- Old low-priority jobs eventually outrank new high-priority jobs
 
-### Segmented Queue
-
-- Queue consists of linked **segments**
-- Each segment contains:
-  - job buffer
-  - readiness bitmap
-  - producer / consumer cursors
-- Producers append using CAS on a per-segment reserve index
-- Consumers drain **contiguous ready ranges** as batches
-
-Key properties:
-
-- No global locks
-- No per-job wakeups
-- Minimal false sharing
-- Segment reuse via generation counters (ABA-safe)
+RBQ is experimental and scheduling semantics may evolve in later releases.
 
 ---
 
-## Batch Processing
+## Performance Snapshot
 
-Workers wake up only when:
-- enough jobs are pending, or
-- a batch timer fires
+Measured on AMD Ryzen 7 8845HS, Go 1.22, Linux.
 
-This allows:
-- amortized synchronization cost
-- better cache locality
-- predictable throughput under load
+Typical steady-state throughput:
 
----
+    ~22–23 M jobs/sec
+    ~43 ns/op
+    0 allocs/op
 
-## Shutdown Semantics
-
-```go
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
-
-if err := pool.Shutdown(ctx); err != nil {
-	// deadline exceeded
-}
-```
-
-- Prevents new submissions
-- Drains queued work
-- Waits for workers to finish or deadline to expire
-
----
-
-## Metrics
-
-Metrics are **policy-driven**:
-
-```go
-type MetricsPolicy interface {
-	IncQueued()
-	BatchDecQueued(n int)
-}
-```
-
-This keeps the hot path free of unnecessary overhead.
+These figures represent queue + scheduler overhead with minimal job body.
 
 ---
 
@@ -215,51 +106,83 @@ This keeps the hot path free of unnecessary overhead.
 
 ```go
 type Options struct {
-	Workers       int
-	SegmentSize   uint32
-	SegmentCount  uint32
-	PoolCapacity  uint32
-	QT            QueueType
-	PinWorkers    bool
+    Workers      int
+    QT           QueueType
+    SegmentSize  uint32
+    SegmentCount uint32
+    PoolCapacity uint32
+    PinWorkers   bool
 }
 ```
 
-Defaults are applied automatically via `FillDefaults()`.
+Defaults:
+
+- Workers → GOMAXPROCS
+- QT → SegmentedQueue (FIFO)
+- SegmentSize → DefaultSegmentSize
+- SegmentCount → DefaultSegmentCount
 
 ---
 
-## QueueType
+## Job Model
 
-Currently implemented:
+```go
+type Job[T any] struct {
+    Payload T
+    Fn      JobFunc[T]
+    Flags   uint64
+    Meta    *JobMeta
+}
+```
 
-- **SegmentedQueue** — lock-free FIFO queue
+Priority is encoded in lower 6 bits of `Flags`.
 
-`QueueType` exists as an extension point. Other schedulers (bucketed, priority, aging)
-are not yet wired in.
+```go
+func (j *Job[T]) SetPriority(p JobPriority)
+func (j Job[T]) GetPriority() JobPriority
+```
 
----
-
-## What This Is (and Isn’t)
-
-This **is**:
-- a high-performance execution engine
-- suitable for internal systems, pipelines, schedulers
-- ideal when you care about ns/op and cache lines
-
-This is **not**:
-- a feature-rich task framework
-- a priority scheduler (yet)
-- a general-purpose job system
+SegmentedQueue ignores priority.
+RBQ uses it for scheduling.
 
 ---
 
-## Roadmap (Explicitly Non-Promissory)
+## Shutdown
 
-Planned directions (not yet implemented):
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
 
-- Bucket-based priority scheduler
-- Aging via queue rotation
-- Adaptive segment provisioning
-- NUMA-aware worker placement
+if err := pool.Shutdown(ctx); err != nil {
+    // deadline exceeded
+}
+```
 
-These are **design directions**, not guarantees.
+- Prevents new submissions
+- Drains queued work
+- Waits for workers or deadline
+
+---
+
+## Status
+
+Current version: 
+
+- Core architecture stable
+- FIFO scheduler stable
+- RBQ scheduling semantics experimental
+- API may evolve before v1.0.0
+
+---
+
+## Motivation
+
+This project was built from fascination with system design, concurrency,
+and performance engineering.
+
+It is both:
+
+- A high-performance execution engine
+- A playground for exploring scheduling strategies
+
+Contributions and feedback are welcome.
