@@ -91,13 +91,6 @@ type schedQueue[T any] interface {
 
 	StatSnapshot()string
 
-	//// MaybeHasWork performs a fast, approximate check
-	//// for whether the queue may contain work.
-	//MaybeHasWork() bool
-	//
-	//// Len returns the number of jobs currently enqueued.
-	////
-	//// Implementations may return an approximate value.
-	//Len() int
+	Close()
 }
 
