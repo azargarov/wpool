@@ -1,8 +1,8 @@
 PKG          := ./...
-TEST_PKG     := ./tests
-TEST_OUT     := ./tests/out
-BENCH_FULL   := BenchmarkPool$$
-BENCH_SINGLE := BenchmarkPool_single
+TEST_PKG     := 
+TEST_OUT     := ./out
+BENCH_FULL   := BenchmarkPool_Throughput
+BENCH_SINGLE := BenchmarkPool_Single
 DEBUG_FLAGS  := OBSERVER=1
 GOFLAGS      :=
 GCFLAGS      := all=-l=4 -B
@@ -22,10 +22,6 @@ test:
 
 bench:
 	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_FULL) -benchmem -count=1 -v
-
-bench-noopt:
-	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_FULL) -benchmem \
-		-gcflags="$(GCFLAGS)" -count=1
 
 bench-fast:
 	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem \
