@@ -29,13 +29,11 @@ var (
 type producerView struct {
 	tail    uint32
 	reserve uint32
-	_       cachePad
 }
 
 // consumerView contains fields frequently modified by consumers.
 type consumerView struct {
 	head uint32
-	_    cachePad
 }
 
 // segment is a fixed-size chunk of jobs forming a node in a linked list.
@@ -52,29 +50,27 @@ type consumerView struct {
 type segment[T any] struct {
 	producer producerView
 	consumer consumerView
-
+	// next points to the next segment in the queue.
+	next  atomic.Pointer[segment[T]]
+	
 	// inflight counts how many batches are currently being processed
 	// from this segment.
 	inflight atomic.Int32
-
+	
 	// gen is a generation counter used to distinguish reused slots
 	// without clearing the ready array.	
 	gen      atomic.Uint32
-
+	
 	// refs counts active producers/consumers holding a reference
 	// to this segment.
 	refs atomic.Int32
 	_    cachePad
-
+	
 	// buf holds job payloads.
 	buf   []Job[T]
-
+	
 	// ready marks whether a slot belongs to the current generation.
 	ready []uint32
-	_     cachePad
-
-	// next points to the next segment in the queue.
-	next  atomic.Pointer[segment[T]]
 }
 
 // segmentedQ is a multi-producer, multi-consumer queue composed
@@ -146,7 +142,7 @@ func (q *segmentedQ[T])Close() {
 // It is lock-free and safe for concurrent producers.
 // Returns false if the queue is no longer accepting work.
 func (q *segmentedQ[T]) Push(v Job[T]) error {
-	const maxRetries = 1000
+	const maxRetries = 128
     retries := 0
 	for {
 		seg := q.tail.Load()
