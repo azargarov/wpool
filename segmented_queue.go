@@ -143,28 +143,28 @@ func (q *segmentedQ[T])Close() {
 // Returns false if the queue is no longer accepting work.
 func (q *segmentedQ[T]) Push(v Job[T]) error {
 	const maxRetries = 128
-    retries := 0
+    //retries := 0
 	for {
 		seg := q.tail.Load()
 		if seg == nil {
 			return segErrorNilSegment
 		}
 
-		if !seg.tryAddRef() {
-			retries++
-            if retries > maxRetries {
-                runtime.Gosched()
-                retries = 0
-            }
-			continue
-		}
+		//if !seg.tryAddRef() {
+		//	retries++
+        //    if retries > maxRetries {
+        //        runtime.Gosched()
+        //        retries = 0
+        //    }
+		//	continue
+		//}
 
-		retries = 0
+		//retries = 0
 		
 		g := seg.gen.Load()
 
 		if q.tail.Load() != seg {
-			seg.refs.Add(-1)
+			//seg.refs.Add(-1)
 			continue
 		}
 
@@ -173,12 +173,14 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 			if r >= q.pageSize {
 				break
 			}
+			
 			if atomic.CompareAndSwapUint32(&seg.producer.reserve, r, r+1) {
 				seg.buf[r] = v
 				atomic.StoreUint32(&seg.ready[r], g)
-				seg.refs.Add(-1)
+				//seg.refs.Add(-1)
 				return nil
 			}
+			//runtime.Gosched()
 		}
 
 		next := seg.next.Load()
@@ -193,7 +195,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 		}
 
 		q.tail.CompareAndSwap(seg, next)
-		seg.refs.Add(-1)
+		//seg.refs.Add(-1)
 	}
 }
 
@@ -306,6 +308,7 @@ func (s *segment[T]) tryAddRef() bool {
             }
             backoff = min(backoff*2, 16)
         }
+		runtime.Gosched()
     }
     return false
 }
