@@ -13,11 +13,11 @@ const (
 	// defaultPushBatch is the minimum number of pending jobs
 	// required before a worker wake-up is triggered eagerly.
 	// Smaller values reduce latency, larger values improve batching.
-	defaultPushBatch   = 256
+	defaultWakeMinJobs   = 256
 
 	// batchTimerInterval is the periodic interval used by the batch timer
 	// to ensure progress even if no new submissions arrive.
-	batchTimerInterval = 30 * time.Microsecond
+	defaultFlushInterval = 30 * time.Microsecond
 )
 
 var (
@@ -202,7 +202,7 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 	pj := p.pendingJobs.Add(1)
 
 	// Delay wake-up until batch threshold is reached.
-	if pj < defaultPushBatch {
+	if pj < int64(p.opts.WakeMinJobs) {
 		return nil
 	}
 
@@ -281,7 +281,7 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
 }
 
 func (p *Pool[T, M]) batchTimer() {
-	t := time.NewTicker(batchTimerInterval)
+	t := time.NewTicker(p.opts.FlushInterval)
 	defer t.Stop()
 
 	for {
@@ -293,7 +293,7 @@ func (p *Pool[T, M]) batchTimer() {
 			if p.pendingJobs.Load() == 0 {
 				continue
 			}
-			if time.Since(time.Unix(0, p.lastDrainNano.Load())) < batchTimerInterval {
+			if time.Since(time.Unix(0, p.lastDrainNano.Load())) < p.opts.FlushInterval {
 				continue
 			}
 			if p.batchInFlight.CompareAndSwap(false, true) {

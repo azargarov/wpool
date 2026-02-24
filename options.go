@@ -2,6 +2,7 @@ package workerpool
 
 import (
 	"runtime"
+	"time"
 )
 
 // QueueType defines the scheduling strategy used by the worker pool.
@@ -58,6 +59,10 @@ type Options struct {
 	// When enabled, workers may be locked to OS threads to reduce
 	// migration and improve cache locality.
 	PinWorkers bool
+
+	WakeMinJobs uint
+
+	FlushInterval time.Duration
 }
 
 // WithWorkers sets the number of worker goroutines.
@@ -95,6 +100,18 @@ func WithQT(qt QueueType) Option {
 	}
 }
 
+func WithWakeMinJobs(wj uint) Option {
+	return func(o *Options) {
+		o.WakeMinJobs = wj
+	}
+}
+
+func WithFlushInterval(t time.Duration) Option {
+	return func(o *Options) {
+		o.FlushInterval = t
+	}
+}
+
 // FillDefaults replaces zero-value fields with default settings.
 //
 // It is called internally by the Pool constructor and may also be
@@ -112,7 +129,13 @@ func (o *Options) FillDefaults() {
 	if o.SegmentCount <= 0 {
 		o.SegmentCount = DefaultSegmentCount
 	}
-
+	if o.WakeMinJobs == 0 {
+    	o.WakeMinJobs= defaultWakeMinJobs
+	}
+		
+	if o.FlushInterval == 0 {
+    	o.FlushInterval= defaultFlushInterval
+	}
 }
 
 // String returns the human-readable name of the queue type.
