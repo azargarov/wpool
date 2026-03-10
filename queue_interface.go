@@ -92,5 +92,7 @@ type schedQueue[T any] interface {
 	StatSnapshot()string
 
 	Close()
+
+	DebugHead() string
 }
 

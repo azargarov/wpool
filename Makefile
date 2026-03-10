@@ -8,7 +8,8 @@ GOFLAGS      :=
 GCFLAGS      := all=-l=4 -B
 
 .PHONY: lint test bench bench-fast bench-stress bench-long \
-        bench-debug pprof-mem pprof-cpu perf clean
+        bench-debug pprof-mem pprof-cpu perf clean test-correctness \
+		test-correctness-stress test-queue test-pool
 
 
 lint:
@@ -22,6 +23,9 @@ test:
 
 bench:
 	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_FULL) -benchmem -count=1 -v
+
+bench-single:
+	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem -count=1 -v
 
 bench-fast:
 	go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem \
@@ -44,6 +48,18 @@ pprof-mem:
 
 pprof-cpu:
 	go tool pprof -http=:8080 $(TEST_OUT)/cpu.out
+
+test-queue:
+	go test -run 'TestSegmentedQueue_ExactOnce_MPMC|TestSegmentedQueue_ExactOnce_Bursty' -race -count=10 -v
+
+test-pool:
+	go test -run 'TestPool_ExactOnce_SmallSegments' -race -count=10 -v
+
+test-correctness:
+	go test -run 'TestSegmentedQueue_ExactOnce_MPMC|TestSegmentedQueue_ExactOnce_Bursty|TestPool_ExactOnce_SmallSegments' -race -count=10 -v
+
+test-correctness-stress:
+	go test -run 'TestSegmentedQueue_ExactOnce_MPMC|TestSegmentedQueue_ExactOnce_Bursty|TestPool_ExactOnce_SmallSegments' -race -count=100 -v -timeout=30m	
 
 perf:
 	perf stat \

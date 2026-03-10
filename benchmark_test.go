@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"math/rand"
 	"math"
+	"sync"
+	"os"
 
 	wp "github.com/azargarov/wpool"
 )
@@ -127,7 +129,10 @@ func BenchmarkRBQ_PushPop(b *testing.B) {
 	}
 }
 func BenchmarkPool_Single(b *testing.B) {
-	segSize := 4096
+	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0) ) 
+	segSize := getenvInt("SEGSIZE",512)
+	segCount := getenvInt("SEGCOUNT", 32)
+	pinned := getenvInt("PINNED", 0) > 0
 
 	cases := []struct {
 		name         string
@@ -135,10 +140,11 @@ func BenchmarkPool_Single(b *testing.B) {
 		segmentSize  int
 		segmentCount int
 		pinned       bool
+		work         func(any)error
 		queueType    wp.QueueType
 	}{
-		{"RBQ/C8", runtime.GOMAXPROCS(0), segSize, 32, false, wp.RevolvingBucketQueue},
-		{"SEGQ/C8", runtime.GOMAXPROCS(0), segSize, 32, false, wp.SegmentedQueue},
+		//{"RBQ/C8", workers, segSize, 32, pinned, emptyWork, wp.RevolvingBucketQueue},
+		{"SEGQ/C8", workers, segSize, segCount, pinned, emptyWork, wp.SegmentedQueue},
 	}
 
 	for _, tc := range cases {
@@ -151,7 +157,7 @@ func BenchmarkPool_Single(b *testing.B) {
 				tc.segmentCount,
 				tc.queueType,
 				tc.pinned,
-				emptyWork,
+				tc.work,
 			)
 		})
 	}
@@ -168,12 +174,13 @@ func BenchmarkPool_Throughput(b *testing.B) {
 		pinned       bool
 		queueType    wp.QueueType
 	}{
-		{"RBQ/C 8 ", runtime.GOMAXPROCS(0), segSize, 8, false, wp.RevolvingBucketQueue},
-		{"RBQ/C16 ", runtime.GOMAXPROCS(0), segSize, 16, false, wp.RevolvingBucketQueue},
-		{"RBQ/C32 ", runtime.GOMAXPROCS(0), segSize, 32, false, wp.RevolvingBucketQueue},
-		{"RBQ/C128", runtime.GOMAXPROCS(0), segSize, 128, false, wp.RevolvingBucketQueue},
-		{"RBQ/C32P", runtime.GOMAXPROCS(0), segSize, 32, true, wp.RevolvingBucketQueue},
+		//{"RBQ/C 8 ", runtime.GOMAXPROCS(0), segSize, 8, false, wp.RevolvingBucketQueue},
+		//{"RBQ/C16 ", runtime.GOMAXPROCS(0), segSize, 16, false, wp.RevolvingBucketQueue},
+		//{"RBQ/C32 ", runtime.GOMAXPROCS(0), segSize, 32, false, wp.RevolvingBucketQueue},
+		//{"RBQ/C128", runtime.GOMAXPROCS(0), segSize, 128, false, wp.RevolvingBucketQueue},
+		//{"RBQ/C32P", runtime.GOMAXPROCS(0), segSize, 32, true, wp.RevolvingBucketQueue},
 		{"SEG/C8 ", runtime.GOMAXPROCS(0), segSize, 8, false, wp.SegmentedQueue},
+		{"SEG/C16 ", runtime.GOMAXPROCS(0), segSize, 16, false, wp.SegmentedQueue},
 		{"SEG/C32 ", runtime.GOMAXPROCS(0), segSize, 32, false, wp.SegmentedQueue},
 		{"SEG/C64 ", runtime.GOMAXPROCS(0), segSize, 64, false, wp.SegmentedQueue},
 	}
@@ -211,51 +218,92 @@ func runPoolThroughputBench(
 		QT:           qt,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 4096,
+		PoolCapacity: 512,
 		PinWorkers:   pinned,
 	}
 
-	pool := wp.NewPoolFromOptions[*wp.NoopMetrics, int](
-		&wp.NoopMetrics{},
+	pool := wp.NewPoolFromOptions[*wp.AtomicMetrics, int](
+		&wp.AtomicMetrics{}, //&wp.NoopMetrics{},
 		opts,
 	)
 	defer pool.Shutdown(context.Background())
 
-	var executed atomic.Int64
-	job := wp.Job[int]{
-		Fn: func(int) error {
-			executed.Add(1)
-			fn(struct{}{})
-			return nil
-		},
+	//var executed atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(b.N)
+	
+	var idGen atomic.Int64
+	
+	
+	jobFn := func(id int) error {
+		fn(0)
+	    wg.Done()
+	    return nil
 	}
-
+	
+	if os.Getenv("OBSERVER") == "1" {
+		done := make(chan struct{})
+		defer close(done)
+		go observer(1*time.Second, done, pool)
+	}
 	b.ResetTimer()
 	start := time.Now()
+	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		seed := seedCounter.Add(1)
 		r := rand.New(rand.NewSource(seed))
 		for pb.Next() {
 			prio := (wp.JobPriority)(r.Intn(62) + 1)
-			j := job
-			j.SetPriority(prio)
+			id := int(idGen.Add(1))
+			j := wp.Job[int]{Payload: id, Fn: jobFn}
 
+			j.SetPriority(prio)
+			
 			if err := pool.Submit(j); err != nil {
 				b.Fatalf("submit failed: %v", err)
 			}
 		}
 	})
-	waitUntilB(b, 10*time.Second, func() bool {
-		return executed.Load() == int64(b.N)
-	})
+	
+	
+	println("b.N: ", b.N)
+	wg.Wait()
+	//waitUntilB(b, 30*time.Second, func() bool {
+	//	//println("Executed so far: ",executed.Load(), " b.N: ", b.N)
+	//	return executed.Load() == int64(b.N)
+	//})
+	//print("Executed: ",executed.Load(),"\n")
 	
 	elapsed := time.Since(start)
 	secs := elapsed.Seconds()
 
-	jobs := float64(executed.Load())
+	jobs := float64(b.N)
 	kjps := math.Round((jobs / secs)/1e3) 
 
 	//b.ReportMetric(jps/1e6, "Mj/s") 
 	b.ReportMetric(kjps, "kj/s") 
 	//b.ReportMetric((secs*1e9)/jobs, "ns/job")
 }
+
+func observer(t time.Duration, done chan struct{} ,p *wp.Pool[int, *wp.AtomicMetrics]){
+
+	ticker := time.NewTicker(t)
+	for {
+		select {
+		case <- done:
+			return
+		case <- ticker.C:
+			print(p.StatSnapshot())
+			println(p.MetricsStr())
+			println(p.DebugHead())
+			
+		}
+	}
+
+}
+
+//GOMAXPROCS=1 WORKERS=16 perf c2c record --  go test  -run=^$ -bench=BenchmarkPool_Single -benchmem -count=1 -v
+//GOMAXPROCS=16 WORKERS=16 taskset -c 0-15 perf c2c record --all-user -o perf-c2c.data -- \
+//  ./wpool.test -test.run=^$ -test.bench=BenchmarkPool_Single -test.benchmem -test.count=3 -test.v
+//
+//perf c2c report -i perf-c2c.data --stdio

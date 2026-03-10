@@ -3,7 +3,6 @@ package workerpool
 import (
 	"errors"
 	"math/bits"
-	"sync"
 	"sync/atomic"
 	"runtime"
 )
@@ -43,7 +42,6 @@ type RevolvingBucketQ[T any] struct {
 
 	// fast-path hint to avoid work when empty
 	hasWork atomic.Bool
-	rotateMu sync.Mutex
 
 	pool segmentPoolProvider[T]
 }
@@ -84,9 +82,9 @@ func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
 	if p < MinBucketPriority || p > MaxBucketPriority {
 		return ErrInvalidPriority
 	}
-
 	highestPriorityBucket := uint8(rq.state.highestPriorityBucket.Load() & 63)
-    idx := (highestPriorityBucket + uint8(p)) & 63 
+    
+	idx := (highestPriorityBucket + uint8(p)) & 63 
 
 	err := rq.buckets[idx].q.Push(job)
 	if err != nil {
@@ -109,19 +107,20 @@ func (rq *RevolvingBucketQ[T]) Push(job Job[T]) ( error) {
 	    }
 	}
 	rq.hasWork.Store(true)
-
 	return nil
 }
 
 func (rq *RevolvingBucketQ[T]) BatchPop() (Batch[T], bool) {
+	
 	if !rq.hasWork.Load() {
-	    if rq.state.nonEmptyMask.Load() == 0 {
-        	return Batch[T]{}, false
+		if rq.state.nonEmptyMask.Load() == 0 {
+			return Batch[T]{}, false
     	}
     	rq.hasWork.Store(true) 
 	}
-
+	
 	retries := 0
+	
 	for {
 		highestPriorityBucket := uint8(rq.state.highestPriorityBucket.Load() & 63)
 		batch, ok := rq.buckets[highestPriorityBucket].q.BatchPop()
@@ -151,6 +150,7 @@ func (rq *RevolvingBucketQ[T]) BatchPop() (Batch[T], bool) {
 }
 
 func (rq *RevolvingBucketQ[T]) rotate() bool {
+
     for {
         currentBase := uint8(rq.state.highestPriorityBucket.Load() & 63)
 		old := rq.state.nonEmptyMask.Load()
@@ -171,7 +171,6 @@ func (rq *RevolvingBucketQ[T]) rotate() bool {
         if next >= 64 {
             return false
         }
-
         if rq.state.nonEmptyMask.CompareAndSwap(old, cleared) {
             rq.state.highestPriorityBucket.Store(uint64(next))
 			// debug
@@ -201,5 +200,20 @@ func (rq *RevolvingBucketQ[T])  Len() int {
 
 // MaybeHasWork performs a fast, approximate check for available work.
 func (rq *RevolvingBucketQ[T])  MaybeHasWork() bool {
-	return false
+	return rq.hasWork.Load()
+}
+
+func (q *RevolvingBucketQ[T]) DebugHead() string {
+	return ""
+    //seg := q.head.Load()
+    //if seg == nil {
+    //    return "head=nil"
+    //}
+    //h := atomic.LoadUint32(&seg.consumer.head)
+    //r := atomic.LoadUint32(&seg.producer.reserve)
+    //g := seg.gen.Load()
+    //next := seg.next.Load()
+    //ready0 := atomic.LoadUint32(&seg.ready[h]) // first unread slot
+    //return fmt.Sprintf("h=%d r=%d g=%d next=%v ready[h]=%d pageSize=%d",
+    //    h, r, g, next != nil, ready0, q.pageSize)
 }

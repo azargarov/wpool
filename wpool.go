@@ -3,21 +3,23 @@ package workerpool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+	//"os"
 )
 
 const (
 	// defaultPushBatch is the minimum number of pending jobs
 	// required before a worker wake-up is triggered eagerly.
 	// Smaller values reduce latency, larger values improve batching.
-	defaultWakeMinJobs   = 256
+	defaultWakeMinJobs   = 16
 
 	// batchTimerInterval is the periodic interval used by the batch timer
 	// to ensure progress even if no new submissions arrive.
-	defaultFlushInterval = 30 * time.Microsecond
+	defaultFlushInterval = 50 * time.Microsecond
 )
 
 var (
@@ -34,6 +36,18 @@ type ErrorHandler func(e error)
 // WakeupWorker is a lightweight signal channel used to wake
 // an idle worker.
 type WakeupWorker chan struct{}
+
+type timerHot struct {
+    lastDrainNano atomic.Int64
+}
+
+type drainHot struct {
+    batchInFlight atomic.Bool
+}
+
+type submitHot struct {
+    pendingJobs atomic.Int64
+}
 
 // Pool is a high-performance worker pool with batched scheduling.
 //
@@ -62,15 +76,17 @@ type Pool[T any, M MetricsPolicy] struct {
 	workersActive []atomic.Bool
 
 	// pendingJobs is the global count of queued but unprocessed jobs.
-	pendingJobs   atomic.Int64
-
+	//pendingJobs   atomic.Int64
+	submit 	submitHot
 	// batchInFlight ensures only one batch drain runs at a time.
-	batchInFlight atomic.Bool
+	//batchInFlight atomic.Bool
+	drain drainHot
 
 	// lastDrainNano tracks the last successful batch drain timestamp.
-	lastDrainNano atomic.Int64
+	timer timerHot
 
 	wgWorkers   sync.WaitGroup
+
 	workersDone chan struct{}
 
 	// OnInternaError is called when the pool encounters
@@ -90,8 +106,6 @@ func (p *Pool[T, M]) GetIdleLen() int64 {
 	return int64(len(p.idleWorkers))
 }
 
-// NewPool creates a new Pool using the provided metrics implementation
-// and optional configuration options.
 func NewPool[M MetricsPolicy, T any](metrics M, opts ...Option) *Pool[T, M] {
 	o := Options{}
 	for _, opt := range opts {
@@ -112,14 +126,12 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 		idleWorkers:   make(chan WakeupWorker, opts.Workers),
 		workersActive: make([]atomic.Bool, opts.Workers),
 	}
-	//p.queue = p.makeQueue()
     switch opts.QT {
     case SegmentedQueue:
         p.queue = NewSegmentedQ[T](opts, nil)
     case RevolvingBucketQueue:
         p.queue = NewRevolvingBucketQ[T](opts)
     }
-	//p.queue = NewRevolvingBucketQ[T](opts)
 	p.metrics = metrics
 	p.wakes = make([]WakeupWorker, opts.Workers)
 	for i := 0; i < opts.Workers; i++ {
@@ -128,11 +140,11 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 
 	// Start workers.
 	for i := 0; i < opts.Workers; i++ {
+		p.wgWorkers.Add(1)
+		p.setWorkerState(i, true)
 		go func(id int) {
 			p.batchWorker(id, &p.wgWorkers)
 		}(i)
-		p.wgWorkers.Add(1)
-		p.setWorkerState(i, true)
 	}
 
 	// Track worker completion.
@@ -142,16 +154,14 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 		close(p.workersDone)
 	}()
 
-	p.lastDrainNano.Store(time.Now().UnixNano())
-
+	p.timer.lastDrainNano.Store(time.Now().UnixNano())
+	p.drain.batchInFlight.Store(false)
 	// Start periodic batch timer.
 	go p.batchTimer()
 
 	return p
 }
 
-// Shutdown gracefully stops the pool, waiting for workers
-// to finish or until the provided context is canceled.
 func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 	p.stopOnce.Do(func() {
 		p.shutdown.Store(true)
@@ -167,13 +177,9 @@ func (p *Pool[T, M]) Shutdown(ctx context.Context) error {
 	}
 }
 
-// Stop shuts down the pool using a background context.
 func (p *Pool[T, M]) Stop() { _ = p.Shutdown(context.Background()) }
 
-// Submit enqueues a job for execution.
-//
-// It may trigger a worker wake-up depending on batching state.
-// Submit is non-blocking and safe for concurrent use.
+
 func (p *Pool[T, M]) Submit(job Job[T]) error {
 	if p.shutdown.Load() {
 		return ErrClosed
@@ -192,92 +198,105 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 		}
 	}
 
-	err := p.queue.Push(job)
-	if err != nil {
-		return err
-	}
-
+	pj := p.submit.pendingJobs.Add(1)
 	p.metrics.IncQueued()
 
-	pj := p.pendingJobs.Add(1)
-
-	// Delay wake-up until batch threshold is reached.
-	if pj < int64(p.opts.WakeMinJobs) {
-		return nil
+	if err := p.queue.Push(job); err != nil {
+	    p.metrics.BatchDecQueued(1)
+	    newPending := p.submit.pendingJobs.Add(-1)
+	    if newPending < 0 {
+	        p.submit.pendingJobs.Store(0)
+	    }
+	    return err
 	}
 
-	// Attempt to trigger a batch drain.
-	if p.batchInFlight.CompareAndSwap(false, true) {
-		select {
-		case w := <-p.idleWorkers:
-			w <- struct{}{}
-			p.lastDrainNano.Store(time.Now().UnixNano())
-		default:
-			p.batchInFlight.Store(false)
-		}
+	if pj >= p.opts.WakeMinJobs {  
+			p.drain.batchInFlight.Store(true)
+				select {
+				case w := <-p.idleWorkers:
+					w <- struct{}{}
+				default:
+					p.drain.batchInFlight.Store(false)
+				}
+			
 	}
 	return nil
 }
 
 func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
+    defer func() {
+        p.drain.batchInFlight.Store(false)
+        p.setWorkerState(id, false)
+        wg.Done()
+    }()
 
-	defer func() {
-		p.batchInFlight.Store(false)
-		p.setWorkerState(id, false)
-		wg.Done()
-	}()
+    if p.opts.PinWorkers {
+        runtime.LockOSThread()
+        defer runtime.UnlockOSThread()
+        if err := PinToCPU(id % runtime.NumCPU()); err != nil {
+            p.reportInternalError(err)
+        }
+    }
 
-	if p.opts.PinWorkers {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
+    wake := p.wakes[id]
 
-		if err := PinToCPU(id % runtime.NumCPU()); err != nil {
-			p.reportInternalError(err)
-		}
-	}
+    select {
+    case p.idleWorkers <- wake:
+    case <-p.doneCh:
+        return
+    }
 
-	wake := p.wakes[id]
+    for {
+        select {
+        case <-wake:
+        case <-p.doneCh:
+            return
+        }
 
-	// initial publish
-	select {
-	case p.idleWorkers <- wake:
-	case <-p.doneCh:
-		return
-	}
+        for {
+            if p.shutdown.Load() {
+                p.drain.batchInFlight.Store(false)
+                return
+            }
 
-	for {
-		select {
-		case <-wake:
-		case <-p.doneCh:
-			p.batchInFlight.Store(false)
-			return
-		}
+            jobsNum := p.batchProcessJob()
 
-		if p.shutdown.Load() {
-			p.batchInFlight.Store(false)
-			return
-		}
-		deQueued := p.batchProcessJob()
-		p.metrics.BatchDecQueued(deQueued)
-		new := p.pendingJobs.Add(-int64(deQueued))
-		if new < 0 {
-			p.pendingJobs.Store(0)
-		}
-		p.batchInFlight.Store(false)
-		p.lastDrainNano.Store(time.Now().UnixNano())
+            if jobsNum > 0 {
+                p.metrics.BatchDecQueued(jobsNum)
+				newPending := p.submit.pendingJobs.Add(-int64(jobsNum))
+                if newPending < 0 {
+                    p.submit.pendingJobs.Store(0)
+                }
+                p.timer.lastDrainNano.Store(time.Now().UnixNano())
+            }
 
-		if p.shutdown.Load() {
-			return
-		}
-		select {
-		case p.idleWorkers <- wake:
-		case <-p.doneCh:
-			for p.batchProcessJob() > 0 {}
-			return
-		default:
-			//TODO: timer/submit can still find other workers but if handle it might reduce wake efficiency
-		}
-	}
+            p.drain.batchInFlight.Store(false)
+
+			if p.submit.pendingJobs.Load() > 0 {
+			    if p.drain.batchInFlight.CompareAndSwap(false, true) {
+			        continue
+			    }
+			}
+			
+            if p.shutdown.Load() {
+                return
+            }
+
+            if p.submit.pendingJobs.Load() == 0 {
+                break
+            }
+
+            if !p.drain.batchInFlight.CompareAndSwap(false, true) {
+                break
+            }
+        }
+
+        select {
+        case p.idleWorkers <- wake:
+        case <-p.doneCh:
+            return
+        }
+    }
 }
 
 func (p *Pool[T, M]) batchTimer() {
@@ -290,41 +309,48 @@ func (p *Pool[T, M]) batchTimer() {
 			if p.shutdown.Load() {
 				return
 			}
-			if p.pendingJobs.Load() == 0 {
+			if p.submit.pendingJobs.Load() == 0 {
 				continue
 			}
-			if time.Since(time.Unix(0, p.lastDrainNano.Load())) < p.opts.FlushInterval {
+			if time.Since(time.Unix(0, p.timer.lastDrainNano.Load())) < p.opts.FlushInterval {
 				continue
 			}
-			if p.batchInFlight.CompareAndSwap(false, true) {
+
+			if !p.drain.batchInFlight.CompareAndSwap(false, true) {
+				continue
+			}
+
+			select {
+			case w := <-p.idleWorkers:
 				select {
-				case w := <-p.idleWorkers:
-					w <- struct{}{}
+				case w <- struct{}{}:
 				default:
-					p.batchInFlight.Store(false)
 				}
+			default:
+				p.drain.batchInFlight.Store(false)
 			}
+
 		case <-p.doneCh:
 			return
 		}
 	}
 }
 
-// Metrics returns a snapshot of the current pool metrics.
-//
-// The returned value should be treated as read-only.
-// Metrics collection is implementation-defined by the MetricsPolicy.
 func (p *Pool[T, M]) Metrics() *M {
 	p.metricsMu.Lock()
 	defer p.metricsMu.Unlock()
 	return &p.metrics
 }
 
+func (p *Pool[T, M])MetricsStr() string{
+	return p.metrics.String()  + fmt.Sprintf(", Penidng jobs: %d", p.submit.pendingJobs.Load()) + 
+	fmt.Sprintf(", idle workers : %d", p.GetIdleLen()) + fmt.Sprintf(", active workers: %d", p.ActiveWorkers())
+}
 
-// ActiveWorkers returns the number of workers currently marked as active.
-//
-// A worker is considered active if it has been started and not yet exited.
-// This does not necessarily mean the worker is currently executing a job.
+func (p *Pool[T, M])DebugHead() string{
+	return p.queue.DebugHead()
+}
+
 func (p *Pool[T, M]) ActiveWorkers() int {
 	count := 0
 	for i := range p.workersActive {

@@ -2,6 +2,8 @@ package workerpool
 
 import (
 	"sync/atomic"
+	"fmt"
+	//"golang.org/x/tools/go/analysis/passes/printf"
 )
 
 // MetricsPolicy defines hooks used by the worker pool to report
@@ -22,6 +24,8 @@ type MetricsPolicy interface {
 	// This is typically used when a batch of jobs is removed
 	// from the scheduling queue.
 	BatchDecQueued(n int64)
+
+	String() string
 }
 
 // AtomicMetrics is a lock-free metrics implementation backed by atomics.
@@ -65,6 +69,10 @@ func (m *AtomicMetrics) BatchDecQueued(n int64) {
 	m.queued.Add(-n)
 }
 
+func (m *AtomicMetrics) String() string{
+	return fmt.Sprintf("Executed: %d, Queued: %d", m.executed.Load(), m.queued.Load())
+}
+
 //------------- NoopMetrics ----------------------------------
 
 // NoopMetrics is a MetricsPolicy implementation that discards
@@ -77,3 +85,4 @@ type NoopMetrics struct{}
 func (m *NoopMetrics) IncExecuted()           {}
 func (m *NoopMetrics) IncQueued()             {}
 func (m *NoopMetrics) BatchDecQueued(n int64) {}
+func (m *NoopMetrics) String() string { return ""}

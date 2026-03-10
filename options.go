@@ -60,7 +60,7 @@ type Options struct {
 	// migration and improve cache locality.
 	PinWorkers bool
 
-	WakeMinJobs uint
+	WakeMinJobs int64
 
 	FlushInterval time.Duration
 }
@@ -100,7 +100,7 @@ func WithQT(qt QueueType) Option {
 	}
 }
 
-func WithWakeMinJobs(wj uint) Option {
+func WithWakeMinJobs(wj int64) Option {
 	return func(o *Options) {
 		o.WakeMinJobs = wj
 	}

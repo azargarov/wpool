@@ -16,6 +16,7 @@ type segmentPool[T any] struct {
     // Fast paths
     putCh    chan *segment[T]
     getCh    chan *segment[T]
+    coldCh   chan *segment[T]
     refillCh chan struct{}
 
     prefetch int
@@ -25,7 +26,7 @@ type segmentPool[T any] struct {
 
 func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut int, fastGet int) *segmentPool[T] {
     if maxKeep <= 0 {
-        maxKeep = max(prefill*2, 128)
+        maxKeep = max(prefill*2, 64)
     }
     if prefill < 0 {
         prefill = 4
@@ -46,6 +47,7 @@ func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut in
         putCh:    make(chan *segment[T], fastPut),
         getCh:    make(chan *segment[T], fastGet),
         refillCh: make(chan struct{}, 1),
+        coldCh:    make(chan *segment[T], maxKeep),
         prefetch: 8,
         metrics:  &segmentPoolMetrics{},
     }
@@ -65,25 +67,26 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
     }
     // fast path 
     select {
-    case p.getCh <- seg:
+    case p.putCh <- seg:
         p.metrics.IncFastPutHit()
         return
     default:
     }
 
-    // buffered putCh
-    select {
-    case p.putCh <- seg:
-        p.metrics.IncFastPutToBuf()
-        return
-    default:
-    }
+    //// buffered putCh
+    //select {
+    //case p.putCh <- seg:
+    //    p.metrics.IncFastPutToBuf()
+    //    return
+    //default:
+    //}
 
     // mutex-protected cold storage 
     p.mu.Lock()
+    defer p.mu.Unlock()
+
     if len(p.cold) < p.maxKeep {
         p.cold = append(p.cold, seg)
-        p.mu.Unlock()
         p.metrics.IncFastPutToBuf()
         
         select {
@@ -91,16 +94,17 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
         default:
         }
     } else {
-        p.mu.Unlock()
         p.metrics.IncFastPutDrop()
     }
 }
 
 func (p *segmentPool[T]) Get() *segment[T] {
+    return mkSegment[T](p.pageSize)
     // fast path
     select {
     case seg := <-p.getCh:
-        if seg.refs.Load() != 0 {
+        r := seg.refs.Load()&refMask
+        if r != 0 {
             panic("segment from pool has non-zero refs")
         }
         p.metrics.IncFastGetHit()
@@ -118,7 +122,8 @@ func (p *segmentPool[T]) Get() *segment[T] {
     for range 8 {
         select {
         case seg := <-p.getCh:
-            if seg.refs.Load() != 0 {
+            r := seg.refs.Load() & refMask
+            if r != 0 {
                 panic("segment from pool has non-zero refs")
             }
             p.metrics.IncFastGetHit()
@@ -128,7 +133,7 @@ func (p *segmentPool[T]) Get() *segment[T] {
         }
     }
 
-    p.metrics.IncFallbackAlloc()
+    //p.metrics.IncFallbackAlloc()
     return mkSegment[T](p.pageSize)
 }
 
@@ -146,10 +151,10 @@ func (p *segmentPool[T]) run() {
     refill := func() {
         p.metrics.IncRefillCall()
 
-        // drain cold storage first 
         p.mu.Lock()
-        coldBatch := p.cold
-        p.cold = p.cold[:0] 
+        coldBatch := make([]*segment[T], len(p.cold))
+        copy(coldBatch, p.cold)
+        p.cold = p.cold[:0]
         p.mu.Unlock()
 
         for _, seg := range coldBatch {

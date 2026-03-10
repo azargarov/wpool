@@ -1,11 +1,19 @@
 package workerpool
 
 import (
-	"golang.org/x/sys/cpu"
-	"runtime"
-	"sync/atomic"
 	"errors"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"fmt"
+
+	"golang.org/x/sys/cpu"
 )
+
+const enableRecycle = false
+const maxSpinToYeld = 30
 
 // cachePad is used to prevent false sharing between hot fields.
 type cachePad = cpu.CacheLinePad
@@ -16,7 +24,9 @@ const (
 	// small enough to fit comfortably in cache.
 	DefaultSegmentSize = 4096
 
-	DefaultFastPutGet = 1024
+	DefaultFastPutGet = 4096
+	detachedMask uint64 = 1 << 63
+	refMask      uint64 = ^detachedMask
 )
 
 // DefaultSegmentCount defines the default number of preallocated segments.
@@ -27,70 +37,33 @@ var (
 )
 // producerView contains fields frequently modified by producers.
 type producerView struct {
-	tail    uint32
-	reserve uint32
+	tail    	uint32
+	reserve 	uint32
 }
 
 // consumerView contains fields frequently modified by consumers.
 type consumerView struct {
-	head uint32
+	head 		uint32
+	//inflight 	atomic.Int32
+	//state       uint64        //hi32=head low32=inflight
 }
 
-// segment is a fixed-size chunk of jobs forming a node in a linked list.
-//
-// Segments move through the following logical states:
-//
-//   active   → detached → recycled
-//
-// Synchronization strategy:
-//   - producers reserve slots using CAS
-//   - consumers claim batches via head advancement
-//   - generation counters prevent ABA on slot reuse
-//   - refs/inflight counters ensure safe reclamation
 type segment[T any] struct {
-	producer producerView
-	consumer consumerView
-	// next points to the next segment in the queue.
-	next  atomic.Pointer[segment[T]]
-	
-	// inflight counts how many batches are currently being processed
-	// from this segment.
-	inflight atomic.Int32
-	
-	// gen is a generation counter used to distinguish reused slots
-	// without clearing the ready array.	
-	gen      atomic.Uint32
-	
-	// refs counts active producers/consumers holding a reference
-	// to this segment.
-	refs atomic.Int32
-	_    cachePad
-	
-	// buf holds job payloads.
-	buf   []Job[T]
-	
-	// ready marks whether a slot belongs to the current generation.
-	ready []uint32
+	producer 	producerView
+	consumer 	consumerView
+	next  		atomic.Pointer[segment[T]]
+	gen      	atomic.Uint32
+	refs 		atomic.Uint64
+	ready 		[]uint32
+	buf   		[]Job[T]
+	mu 			sync.Mutex
 }
 
-// segmentedQ is a multi-producer, multi-consumer queue composed
-// of fixed-size segments.
-//
-// It supports:
-//   - lock-free Push
-//   - batched Pop
-//   - safe segment recycling
-//
-// The queue grows dynamically by linking new segments
-// and reuses memory aggressively to reduce allocations.
 type segmentedQ[T any] struct {
-	head atomic.Pointer[segment[T]]
-
-	tail atomic.Pointer[segment[T]]
-
-	pool segmentPoolProvider[T]
-
-	pageSize uint32
+	head 		atomic.Pointer[segment[T]]
+	tail 		atomic.Pointer[segment[T]]
+	pool 		segmentPoolProvider[T]
+	pageSize 	uint32
 }
 
 // mkSegment allocates and initializes a new segment.
@@ -109,7 +82,7 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 
 	capacity := opts.PoolCapacity
 	if capacity <= 0 {
-		capacity = opts.SegmentCount * 2
+		capacity = opts.SegmentCount * 4
 	}
 	if spool == nil{
 		q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(capacity), DefaultFastPutGet, DefaultFastPutGet) 
@@ -121,9 +94,10 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 	first := q.pool.Get()
 	atomic.StoreUint32(&first.consumer.head, 0)
 	atomic.StoreUint32(&first.producer.reserve, 0)
-	first.next.Store(nil)
-	first.inflight.Store(0)
-
+	//first.inflight.Store(0)
+    
+	first.resetForUse()
+	
 	q.head.Store(first)
 	q.tail.Store(first)
 	return q
@@ -137,55 +111,58 @@ func (q *segmentedQ[T])Close() {
 	q.pool.Close()
 }
 
-// Push enqueues a job into the queue.
-//
-// It is lock-free and safe for concurrent producers.
-// Returns false if the queue is no longer accepting work.
 func (q *segmentedQ[T]) Push(v Job[T]) error {
-	const maxRetries = 128
-    //retries := 0
+	spins:=0
 	for {
+		spins ++
+		if spins%maxSpinToYeld ==0 {
+			runtime.Gosched()
+		}
+
 		seg := q.tail.Load()
 		if seg == nil {
 			return segErrorNilSegment
 		}
-
-		//if !seg.tryAddRef() {
-		//	retries++
-        //    if retries > maxRetries {
-        //        runtime.Gosched()
-        //        retries = 0
-        //    }
-		//	continue
-		//}
-
-		//retries = 0
 		
-		g := seg.gen.Load()
-
-		if q.tail.Load() != seg {
-			//seg.refs.Add(-1)
+		if !seg.tryAddRefProducer() {
+			// detached; help tail advance
+			next := seg.next.Load()
+			if next != nil { 
+				q.tail.CompareAndSwap(seg, next) 
+			}
+			//runtime.Gosched()
 			continue
 		}
-
+		//double check tail
+		//if q.tail.Load() != seg{
+		//	seg.releaseRef()
+		//	runtime.Gosched()
+		//	continue
+		//}
+		spin1:=0
+		g := seg.gen.Load()
 		for {
+			
 			r := atomic.LoadUint32(&seg.producer.reserve)
 			if r >= q.pageSize {
 				break
 			}
-			
 			if atomic.CompareAndSwapUint32(&seg.producer.reserve, r, r+1) {
 				seg.buf[r] = v
 				atomic.StoreUint32(&seg.ready[r], g)
-				//seg.refs.Add(-1)
+				seg.releaseRef()
 				return nil
 			}
-			//runtime.Gosched()
+			spin1++
+			if spin1%maxSpinToYeld == 0{
+				runtime.Gosched()
+			}
 		}
 
 		next := seg.next.Load()
 		if next == nil {
 			newSeg := q.pool.Get()
+			newSeg.resetForUse()
 			if seg.next.CompareAndSwap(nil, newSeg) {
 				next = newSeg
 			} else {
@@ -195,14 +172,9 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 		}
 
 		q.tail.CompareAndSwap(seg, next)
-		//seg.refs.Add(-1)
+		seg.releaseRef() 
 	}
 }
-
-// BatchPop dequeues a contiguous batch of jobs.
-//
-// The returned Batch must be completed via OnBatchDone
-// to allow safe segment recycling.
 func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 	for {
 		seg := q.head.Load()
@@ -210,52 +182,138 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 			return Batch[T]{}, false
 		}
 
-		if !seg.tryAddRef() {
-			continue
-		}
-		if q.head.Load() != seg {
-			seg.refs.Add(-1)
+		if !seg.tryAddRefConsumer() {
 			continue
 		}
 
 		h := atomic.LoadUint32(&seg.consumer.head)
 		r := atomic.LoadUint32(&seg.producer.reserve)
-		limit := min(r, q.pageSize)
+		g := seg.gen.Load()
 
 		end := h
-		g := seg.gen.Load()
-		for end < limit && atomic.LoadUint32(&seg.ready[end]) == g {
+		for end < min(r, q.pageSize) && atomic.LoadUint32(&seg.ready[end]) == g {
 			end++
 		}
 
 		if end > h {
 			if atomic.CompareAndSwapUint32(&seg.consumer.head, h, end) {
-				seg.inflight.Add(1)
-				seg.refs.Add(-1)
+				seg.releaseRef()
 				return Batch[T]{Jobs: seg.buf[h:end], Seg: seg, End: end}, true
 			}
-			seg.refs.Add(-1)
+			seg.releaseRef()
 			continue
 		}
 
-		if h == limit {
-			next := seg.next.Load()
-			if next != nil {
-				if q.head.CompareAndSwap(seg, next) {
-					// Mark segment as detached from queue
-            		// This prevents new refs from being taken
-            		seg.markDetached()
-					seg.refs.Add(-1)
-					q.tryRecycle(seg)
-				}
-				seg.refs.Add(-1)
-				continue
-			}
+		if h < min(r, q.pageSize) {
+			seg.releaseRef()
+			continue
 		}
 
-		seg.refs.Add(-1)
+		next := seg.next.Load()
+		if next != nil {
+			// Revalidate with a fresh reserve snapshot before skipping this segment.
+			r2 := atomic.LoadUint32(&seg.producer.reserve)
+			if h < min(r2, q.pageSize) {
+				seg.releaseRef()
+				continue
+			}
+
+			if q.head.CompareAndSwap(seg, next) {
+				seg.detach()
+			}
+			seg.releaseRef()
+			continue
+		}
+
+		if q.tail.Load() != seg {
+			seg.releaseRef()
+			continue
+		}
+
+		seg.releaseRef()
 		return Batch[T]{}, false
 	}
+}
+
+//r2 := atomic.LoadUint32(&seg.producer.reserve)
+//g2 := seg.gen.Load()
+//end2 := h
+//for end2 < min(r2, q.pageSize) && atomic.LoadUint32(&seg.ready[end2]) == g2 {
+//	end2++
+//}
+//if end2 > h {
+//	seg.releaseRef()
+//	continue
+//}
+//if h < min(r2, q.pageSize) {
+//	seg.releaseRef()
+//	continue
+//}
+
+func (q *segmentedQ[T]) BatchPop_old() (Batch[T], bool) {
+	spin:= int64(0)
+    for {
+		spin ++
+		if spin%30==0{
+			runtime.Gosched()
+		}
+
+        seg := q.head.Load()
+        if seg == nil {
+            return Batch[T]{}, false
+        }
+
+        if !seg.tryAddRefConsumer() {
+            continue
+        }
+        //if q.head.Load() != seg {
+        //    seg.releaseRef()
+        //    continue
+        //}
+
+        h := atomic.LoadUint32(&seg.consumer.head)
+        r := atomic.LoadUint32(&seg.producer.reserve)
+		
+        end := h
+
+        g := seg.gen.Load()
+        for end < min(r, q.pageSize) && atomic.LoadUint32(&seg.ready[end]) == g {
+            end++
+        }
+		
+        if end > h {
+			//seg.consumer.inflight.Add(1)
+            if atomic.CompareAndSwapUint32(&seg.consumer.head, h, end) {
+                seg.releaseRef()
+                return Batch[T]{Jobs: seg.buf[h:end], Seg: seg, End: end}, true
+            }
+			//seg.consumer.inflight.Add(-1)
+            seg.releaseRef()
+            continue
+        }
+		
+        if h < min(r, q.pageSize) {
+			seg.releaseRef()
+            continue
+        }
+		
+		next := seg.next.Load()
+        if next != nil {
+            if q.head.CompareAndSwap(seg, next) {
+                seg.detach()
+            }
+            seg.releaseRef()
+            continue
+        }
+
+        if q.tail.Load() != seg {
+            seg.releaseRef()
+            continue
+        }
+
+        seg.releaseRef()
+        return Batch[T]{}, false
+    }
 }
 
 // OnBatchDone must be called after processing a batch
@@ -266,96 +324,144 @@ func (q *segmentedQ[T]) OnBatchDone(b Batch[T]) {
 	if seg == nil {
 		return
 	}
-	n := seg.inflight.Add(-1)
+	//n := seg.consumer.inflight.Add(-1)
 
-	if n < 0 {
-		panic("Inflight went negative")
-	}
+	//if n < 0 {
+	//	panic("Inflight went negative")
+	//}
 	q.tryRecycle(seg)
 }
 
-// In segment:
-func (s *segment[T]) markDetached() {
-    // Atomically set high bit to mark as detached
+
+
+func (s *segment[T]) tryAddRefProducer() bool {
+	if !enableRecycle {
+		return true
+	}
+	spins:=0
+	for {
+		r := s.refs.Load()
+		
+        // already detached
+        if r&detachedMask != 0 {
+			return false
+        }
+		
+        if s.refs.CompareAndSwap(r, r+1) {
+			return true
+        }
+		spins++
+		if spins%maxSpinToYeld == 0{
+			runtime.Gosched()
+		}
+    }
+}
+
+func (s *segment[T]) tryAddRefConsumer() bool {
+	if !enableRecycle {
+		return true
+	}
+	spins:=0
     for {
         r := s.refs.Load()
-        if r < 0 {
-            return // Already marked
-        }
-        // Set to negative to mark detached, but preserve count
-        if s.refs.CompareAndSwap(r, -r-1) {
-            return
-        }
-    }
-}
 
-// tryAddRef attempts to acquire a reference to a segment
-// unless it is already detached.
-func (s *segment[T]) tryAddRef() bool {
-    backoff := 1
-    for attempts := range 16 {
-        r := s.refs.Load()
-        if r < 0 {
-            return false
+        count := r & refMask
+        if count == refMask { 
+            panic("refcount overflow")
         }
-        if s.refs.CompareAndSwap(r, r+1) {
+
+        newVal := (r & detachedMask) | (count + 1)
+
+        if s.refs.CompareAndSwap(r, newVal) {
             return true
         }
-        
-        if attempts > 4 {
-            for i := 0; i < backoff; i++ {
-                runtime.Gosched()
-            }
-            backoff = min(backoff*2, 16)
+		spins++
+        if spins%maxSpinToYeld == 0 {
+            runtime.Gosched()
         }
-		runtime.Gosched()
     }
-    return false
 }
 
+func (s *segment[T]) releaseRef() {
+    if !enableRecycle {
+		return
+	}
+	spins:=0
+	for {
+		r := s.refs.Load()
+		
+        count := r & refMask
+        if count == 0 {
+			panic("releaseRef: negative refcount")
+        }
+		
+        newVal := (r & detachedMask) | (count - 1)
+		
+        if s.refs.CompareAndSwap(r, newVal) {
+			return
+        }
+		spins++
+		if spins%maxSpinToYeld == 0{
+			runtime.Gosched()
+		}
+    }
+}
 
+func (s *segment[T]) reclaimable() bool {
+    refs := s.refs.Load()
+    return refs&detachedMask != 0 &&
+           refs&refMask == 0 //&&
+           //s.consumer.inflight.Load() == 0
+}
 
-// tryRecycle returns a detached segment to the pool
-// once it is no longer referenced or inflight.
+func (s *segment[T]) detach() {
+	if !enableRecycle { return }
+	s.refs.Or(detachedMask)
+}
+
 func (q *segmentedQ[T]) tryRecycle(seg *segment[T]) {
-    // Pre-checks (before marking as detached)
-    if seg.inflight.Load() != 0 {
-        return
-    }
-    
+	if !enableRecycle { return } 
+    //if seg.consumer.inflight.Load() != 0 {
+	//	return
+    //}
+
     if q.head.Load() == seg || q.tail.Load() == seg {
         return
     }
-    
-    // Atomically mark as detached (refs: 0 → -1)
-    if !seg.refs.CompareAndSwap(0, -1) {
-        return // Still has refs or already detached
-    }
-    
-    // Double-check after marking (race with head/tail advancement)
-    if q.head.Load() == seg || q.tail.Load() == seg {
-        // Restore refs - segment is still in use!
-        seg.refs.Store(0)
+
+    r := seg.refs.Load()
+    // must be detached
+    if r&detachedMask == 0 ||r&refMask != 0  {
         return
     }
-    
-    // Now safe to recycle
-    atomic.StoreUint32(&seg.consumer.head, 0)
+
+	atomic.StoreUint32(&seg.consumer.head, 0)
     atomic.StoreUint32(&seg.producer.reserve, 0)
     seg.next.Store(nil)
-    seg.inflight.Store(0)
-    
+    //seg.inflight.Store(0)
+
     newGen := seg.gen.Add(1)
     if newGen == 0 {
         seg.gen.Store(1)
     }
-    
-    seg.refs.Store(0) 
+
+    // Reset refs to attached, zero count
+    seg.refs.Store(detachedMask)
     q.pool.Put(seg)
 }
 
-// Len returns an approximate number of jobs in the queue.
-// Currently unimplemented.
+func (s *segment[T]) resetForUse() {
+    atomic.StoreUint32(&s.consumer.head, 0)
+    atomic.StoreUint32(&s.producer.reserve, 0)
+    s.next.Store(nil)
+    //s.consumer.inflight.Store(0)
+    s.refs.Store(0) 
+	newGen := s.gen.Add(1)
+    if newGen == 0 {
+        s.gen.Store(1)
+    }
+}
+
 func (q *segmentedQ[T]) Len() int {
     total := 0
     seg := q.head.Load()
@@ -379,4 +485,33 @@ func (q *segmentedQ[T]) MaybeHasWork() bool {
 	h := atomic.LoadUint32(&seg.consumer.head)
 	r := atomic.LoadUint32(&seg.producer.reserve)
 	return r > h || seg.next.Load() != nil
+}
+
+func (q *segmentedQ[T]) DebugHead() string {
+    head := q.head.Load()
+    tail := q.tail.Load()
+    
+    h := atomic.LoadUint32(&head.consumer.head)
+    r := atomic.LoadUint32(&head.producer.reserve)
+    g := head.gen.Load()
+    next := head.next.Load()
+    refs := head.refs.Load()
+    //inflight := head.consumer.inflight.Load()
+
+    //tr := atomic.LoadUint32(&tail.producer.reserve)
+    //tg := tail.gen.Load()
+    //trefs := tail.refs.Load()
+    
+	tailNext := tail.next.Load()
+	var res strings.Builder
+	fmt.Fprintf(&res, "head: h=%d r=%d g=%d refs=%d inflight=%d next==nil=%v tailNext==nil=%v tail==head=%v",
+	h, r, g, refs, -1, next == nil, tailNext == nil, tail == head)
+	
+	//fmt.Fprintf(&res, " ready= %v", head.ready)
+	res .WriteString(" ready=[")
+	for i := range r {
+	    fmt.Fprintf(&res, "%d:%d ", i, atomic.LoadUint32(&head.ready[i]))
+	}
+	res .WriteString("]")
+	return res.String() 
 }

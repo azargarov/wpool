@@ -130,7 +130,8 @@ func (s segmentPoolMetricsSnapshot) String() string {
  `SegmentPool Metrics:
   GET:    TotalGets: %d, FastHits: %d, FastMisses: %d, HitRatio: %.2f%%, SlowPathRate: %.2f%%
   PUT:    TotalPuts: %d, FastPutHits: %d,FastPutToBuf: %d ,FastPutDrops: %d
-  REFILL: RefillSignals: %d, RefillCalls: %d, FromFree: %d, Allocated: %d `,
+  REFILL: RefillSignals: %d, RefillCalls: %d, FromFree: %d, Allocated: %d 
+  `,
 		totalGets,
 		s.FastGetHits,
 		s.FastGetMisses,

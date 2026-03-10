@@ -16,8 +16,9 @@ type workload struct {
     fn   wp.JobFunc[any]
 }
 
-var shaData = []byte("some deterministic payloadsome deterministic payloadsome deterministic payloadsome deterministic payload")
 
+//var shaData = []byte("1234 deterministic payloadsome deterministic payloadsome deterministic payloadsome deterministic payload")
+var shaData = make([]byte, 4096)
 var (
 
 	emptyWork = func(any) error{
@@ -26,7 +27,7 @@ var (
 
     cpuWork = func(any) error {
         x := 0
-        for i := range 1000 {
+        for i := range 100000 {
             x += i * i
         }
         _ = x
