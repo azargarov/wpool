@@ -61,12 +61,18 @@ test-correctness:
 test-correctness-stress:
 	go test -run 'TestSegmentedQueue_ExactOnce_MPMC|TestSegmentedQueue_ExactOnce_Bursty|TestPool_ExactOnce_SmallSegments' -race -count=100 -v -timeout=30m	
 
+test-health:
+	GOMAXPROCS=1 go test -run TestPool_Health_Stress -count=20 -timeout=30m -v
+	GOMAXPROCS=8 go test -run TestPool_Health_Stress -count=20 -timeout=30m -v
+	go test -run 'TestSegmentedQueue_ExactOnce_' -count=50 -timeout=30m -v
+
 perf:
 	perf stat \
 		-e cycles,instructions \
 		-e stalled-cycles-frontend \
 		-e cache-references,cache-misses \
 		-e branches,branch-misses \
+		-e stalled-cycles-backend \
 		-e cpu/event=0xcd,umask=0x01/ \
 		go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem -count=4
 
