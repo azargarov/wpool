@@ -4,7 +4,6 @@ import (
 	"errors"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"fmt"
@@ -17,6 +16,7 @@ const maxSpinToYeld = 30
 const maxCASmissesBeforeGiveup = 8
 
 
+type cachePad = cpu.CacheLinePad
 
 const (
 	// DefaultSegmentSize is the default number of jobs per segment.
@@ -35,7 +35,9 @@ var (
 )
 type producerView struct {
 	tail    	uint32
+	_   cachePad
 	reserve 	uint32
+	_   cachePad
 }
 
 type consumerView struct {
@@ -44,14 +46,19 @@ type consumerView struct {
 }
 
 type segment[T any] struct {
-	producer 	producerView
-	consumer 	consumerView
-	next  		atomic.Pointer[segment[T]]
 	gen      	atomic.Uint32
+	_ cachePad
 	refs 		atomic.Uint64
+
+	producer 	producerView
+	_ cachePad   // ?
+
+	consumer 	consumerView
+
+	next  		atomic.Pointer[segment[T]]
+
 	ready 		[]uint32
 	buf   		[]Job[T]
-	mu 			sync.Mutex
 }
 
 type segmentedQ[T any] struct {
@@ -130,10 +137,8 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 		//	runtime.Gosched()
 		//	continue
 		//}
-		spin1:=0
 		g := seg.gen.Load()
 		for {
-			
 			r := atomic.LoadUint32(&seg.producer.reserve)
 			if r >= q.pageSize {
 				break
@@ -143,10 +148,6 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 				atomic.StoreUint32(&seg.ready[r], g)
 				seg.releaseRef()
 				return nil
-			}
-			spin1++
-			if spin1%maxSpinToYeld == 0{
-				runtime.Gosched()
 			}
 		}
 
@@ -166,6 +167,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 		seg.releaseRef() 
 	}
 }
+
 func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 	spins:=0
 
@@ -192,12 +194,18 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 		for end < min(r, q.pageSize) && atomic.LoadUint32(&seg.ready[end]) == g {
 			end++
 		}
-
-		if end > h {
-			if atomic.CompareAndSwapUint32(&seg.consumer.head, h, end) {
-				seg.releaseRef()
-				return Batch[T]{Jobs: seg.buf[h:end], Seg: seg, End: end}, true
+		if end > h{
+			cur := atomic.LoadUint32(&seg.consumer.head)
+			if cur != h {
+			    seg.releaseRef()
+			    continue
 			}
+
+			if atomic.CompareAndSwapUint32(&seg.consumer.head, h, end) {
+			    seg.releaseRef()
+			    return Batch[T]{Jobs: seg.buf[h:end], Seg: seg, End: end}, true
+			}
+
 			seg.releaseRef()
 			continue
 		}
@@ -216,9 +224,14 @@ func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 				continue
 			}
 
-			if q.head.CompareAndSwap(seg, next) {
+			if q.head.Load() != seg{		//TTAS - compare before swap
+				seg.releaseRef()
+				continue
+			}
+			if q.head.CompareAndSwap(seg,next){
 				seg.detach()
 			}
+
 			seg.releaseRef()
 			continue
 		}
@@ -256,10 +269,11 @@ func (s *segment[T]) tryAddRefProducer() bool {
         if r&detachedMask != 0 {
 			return false
         }
-		
-        if s.refs.CompareAndSwap(r, r+1) {
-			return true
-        }
+		if s.refs.Load() == r{
+			if s.refs.CompareAndSwap(r, r+1) {
+				return true
+			}
+		}
 		spins++
 		if spins%maxSpinToYeld == 0{
 			runtime.Gosched()
@@ -271,17 +285,19 @@ func (s *segment[T]) tryAddRefConsumer() bool {
 	spins:=0
     for {
         r := s.refs.Load()
-
         count := r & refMask
-        if count == refMask { 
+
+		if count == refMask { 
             panic("refcount overflow")
         }
 
         newVal := (r & detachedMask) | (count + 1)
+		if s.refs.Load() == r {
+			if s.refs.CompareAndSwap(r, newVal) {
+				return true
+			}
+		}
 
-        if s.refs.CompareAndSwap(r, newVal) {
-            return true
-        }
 		spins++
         if spins%maxSpinToYeld == 0 {
             runtime.Gosched()
@@ -296,15 +312,15 @@ func (s *segment[T]) releaseRef() {
 		r := s.refs.Load()
 		
         count := r & refMask
-        if count == 0 {
-			panic("releaseRef: negative refcount")
-        }
 		
         newVal := (r & detachedMask) | (count - 1)
 		
-        if s.refs.CompareAndSwap(r, newVal) {
-			return
-        }
+		if s.refs.Load() == r{
+			if s.refs.CompareAndSwap(r, newVal) {
+				return
+			}
+		}
+
 		spins++
 		if spins%maxSpinToYeld == 0{
 			runtime.Gosched()
