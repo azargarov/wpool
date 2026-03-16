@@ -14,6 +14,8 @@ import (
 
 const enableRecycle = false
 const maxSpinToYeld = 30
+const maxCASmissesBeforeGiveup = 8
+
 
 // cachePad is used to prevent false sharing between hot fields.
 type cachePad = cpu.CacheLinePad
@@ -177,6 +179,11 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 }
 func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
 	for {
+		spins ++
+		if spins >= maxCASmissesBeforeGiveup {
+			return Batch[T]{}, false
+		}
+
 		seg := q.head.Load()
 		if seg == nil {
 			return Batch[T]{}, false
