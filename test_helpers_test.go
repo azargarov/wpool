@@ -18,7 +18,16 @@ type workload struct {
 
 
 //var shaData = []byte("1234 deterministic payloadsome deterministic payloadsome deterministic payloadsome deterministic payload")
-var shaData = make([]byte, 4096)
+const shaArrSize = 8 * 1024
+var shaData = make([]byte, shaArrSize)
+func init() {
+    shaData = make([]byte, shaArrSize)
+    for i := range shaData {
+        shaData[i] = 0xFF
+    }
+}
+
+
 var (
 
 	emptyWork = func(any) error{
@@ -27,7 +36,7 @@ var (
 
     cpuWork = func(any) error {
         x := 0
-        for i := range 100000 {
+        for i := range 10000 {
             x += i * i
         }
         _ = x
