@@ -6,7 +6,6 @@ import (
 	"time"
 	"context"
 	"sync/atomic"
-	"math/rand"
 	"math"
 	"sync"
 	"os"
@@ -130,9 +129,10 @@ func BenchmarkRBQ_PushPop(b *testing.B) {
 }
 func BenchmarkPool_Single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0) ) 
-	segSize := getenvInt("SEGSIZE",512)
+	segSize := getenvInt("SEGSIZE",2048)
 	segCount := getenvInt("SEGCOUNT", 32)
 	pinned := getenvInt("PINNED", 0) > 0
+	maxProducers := getenvInt("PRODUCERS", runtime.GOMAXPROCS(0)) 
 
 	cases := []struct {
 		name         string
@@ -157,6 +157,7 @@ func BenchmarkPool_Single(b *testing.B) {
 				tc.segmentCount,
 				tc.queueType,
 				tc.pinned,
+				int32(maxProducers),
 				tc.work,
 			)
 		})
@@ -165,6 +166,7 @@ func BenchmarkPool_Single(b *testing.B) {
 
 func BenchmarkPool_Throughput(b *testing.B) {
 	segSize := 2048
+	maxProducers := getenvInt("PRODUCERS", runtime.GOMAXPROCS(0))
 
 	cases := []struct {
 		name         string
@@ -198,6 +200,7 @@ func BenchmarkPool_Throughput(b *testing.B) {
 						tc.segmentCount,
 						tc.queueType,
 						tc.pinned,
+						int32(maxProducers),
 						w.fn,
 					)
 				})
@@ -211,8 +214,10 @@ func runPoolThroughputBench(
 	workers, segSize, segCount int,
 	qt wp.QueueType,
 	pinned bool,
+	maxProducers int32,
 	fn wp.JobFunc[any],
 ) {
+
 	opts := wp.Options{
 		Workers:      workers,
 		QT:           qt,
@@ -222,52 +227,59 @@ func runPoolThroughputBench(
 		PinWorkers:   pinned,
 	}
 
-	pool := wp.NewPoolFromOptions[*wp.AtomicMetrics, int](
-		&wp.AtomicMetrics{}, //&wp.NoopMetrics{},
+	pool := wp.NewPoolFromOptions[*wp.NoopMetrics, int](
+		&wp.NoopMetrics{},
 		opts,
 	)
 	defer pool.Shutdown(context.Background())
 
 	//var executed atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(b.N)
 	
-	var idGen atomic.Int64
+	//var idGen atomic.Int64
 	
 	
 	jobFn := func(id int) error {
 		fn(0)
-	    wg.Done()
 	    return nil
 	}
 	
 	if os.Getenv("OBSERVER") == "1" {
 		done := make(chan struct{})
 		defer close(done)
-		go observer(1*time.Second, done, pool)
+		go observer(5*time.Second, done, pool)
 	}
 	b.ResetTimer()
 	start := time.Now()
 	b.ReportAllocs()
-	b.RunParallel(func(pb *testing.PB) {
-		seed := seedCounter.Add(1)
-		r := rand.New(rand.NewSource(seed))
-		for pb.Next() {
-			prio := (wp.JobPriority)(r.Intn(62) + 1)
-			id := int(idGen.Add(1))
-			j := wp.Job[int]{Payload: id, Fn: jobFn}
 
-			j.SetPriority(prio)
-			
-			if err := pool.Submit(j); err != nil {
-				b.Fatalf("submit failed: %v", err)
-			}
-		}
-	})
-	
-	
-	println("b.N: ", b.N)
-	wg.Wait()
+	var submitted int64
+	var prodWG sync.WaitGroup
+
+	for i := 0; i < int(maxProducers); i++ {
+	    prodWG.Add(1)
+	    go func() {
+	        defer prodWG.Done()
+	        for {
+	            n := atomic.AddInt64(&submitted, 1)
+	            if n > int64(b.N) {
+	                return
+	            }
+
+	            j := wp.Job[int]{Payload: 1, Fn: jobFn}
+	            j.SetPriority(1)
+
+	            for {
+	                if err := pool.Submit(j); err == nil {
+	                    break
+	                }
+	                runtime.Gosched()
+	            }
+	        }
+	    }()
+	}
+
+    prodWG.Wait()
+	//println("b.N: ", b.N)
 	//waitUntilB(b, 30*time.Second, func() bool {
 	//	//println("Executed so far: ",executed.Load(), " b.N: ", b.N)
 	//	return executed.Load() == int64(b.N)
@@ -285,7 +297,7 @@ func runPoolThroughputBench(
 	//b.ReportMetric((secs*1e9)/jobs, "ns/job")
 }
 
-func observer(t time.Duration, done chan struct{} ,p *wp.Pool[int, *wp.AtomicMetrics]){
+func observer(t time.Duration, done chan struct{} ,p *wp.Pool[int, *wp.NoopMetrics]){
 
 	ticker := time.NewTicker(t)
 	for {
