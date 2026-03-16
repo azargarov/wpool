@@ -17,8 +17,6 @@ const maxSpinToYeld = 30
 const maxCASmissesBeforeGiveup = 8
 
 
-// cachePad is used to prevent false sharing between hot fields.
-type cachePad = cpu.CacheLinePad
 
 const (
 	// DefaultSegmentSize is the default number of jobs per segment.
@@ -31,23 +29,18 @@ const (
 	refMask      uint64 = ^detachedMask
 )
 
-// DefaultSegmentCount defines the default number of preallocated segments.
-// It scales with GOMAXPROCS to reduce contention under load.
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
 var (
 	segErrorNilSegment = errors.New("NULL segment")
 )
-// producerView contains fields frequently modified by producers.
 type producerView struct {
 	tail    	uint32
 	reserve 	uint32
 }
 
-// consumerView contains fields frequently modified by consumers.
 type consumerView struct {
 	head 		uint32
-	//inflight 	atomic.Int32
-	//state       uint64        //hi32=head low32=inflight
+	_ cachePad
 }
 
 type segment[T any] struct {
@@ -78,7 +71,6 @@ func mkSegment[T any](segSize uint32) *segment[T] {
 	return &seg
 }
 
-// NewSegmentedQ initializes a segmented queue with preallocated segments.
 func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmentedQ[T] {
 	q := &segmentedQ[T]{pageSize: opts.SegmentSize}
 
@@ -92,11 +84,9 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 		q.pool = spool
 	}
 
-
 	first := q.pool.Get()
 	atomic.StoreUint32(&first.consumer.head, 0)
 	atomic.StoreUint32(&first.producer.reserve, 0)
-	//first.inflight.Store(0)
     
 	first.resetForUse()
 	
@@ -132,7 +122,6 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 			if next != nil { 
 				q.tail.CompareAndSwap(seg, next) 
 			}
-			//runtime.Gosched()
 			continue
 		}
 		//double check tail
