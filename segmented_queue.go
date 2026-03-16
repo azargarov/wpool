@@ -167,6 +167,8 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 	}
 }
 func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
+	spins:=0
+
 	for {
 		spins ++
 		if spins >= maxCASmissesBeforeGiveup {
@@ -245,12 +247,7 @@ func (q *segmentedQ[T]) OnBatchDone(b Batch[T]) {
 	q.tryRecycle(seg)
 }
 
-
-
 func (s *segment[T]) tryAddRefProducer() bool {
-	if !enableRecycle {
-		return true
-	}
 	spins:=0
 	for {
 		r := s.refs.Load()
@@ -271,9 +268,6 @@ func (s *segment[T]) tryAddRefProducer() bool {
 }
 
 func (s *segment[T]) tryAddRefConsumer() bool {
-	if !enableRecycle {
-		return true
-	}
 	spins:=0
     for {
         r := s.refs.Load()
@@ -296,9 +290,7 @@ func (s *segment[T]) tryAddRefConsumer() bool {
 }
 
 func (s *segment[T]) releaseRef() {
-    if !enableRecycle {
-		return
-	}
+    //if !enableRecycle {return}
 	spins:=0
 	for {
 		r := s.refs.Load()
@@ -333,7 +325,7 @@ func (s *segment[T]) detach() {
 }
 
 func (q *segmentedQ[T]) tryRecycle(seg *segment[T]) {
-	if !enableRecycle { return } 
+	//if !enableRecycle { return } 
     //if seg.consumer.inflight.Load() != 0 {
 	//	return
     //}
