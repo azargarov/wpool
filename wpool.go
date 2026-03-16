@@ -37,12 +37,32 @@ type ErrorHandler func(e error)
 // an idle worker.
 type WakeupWorker chan struct{}
 
+type workerStat struct{
+	casMiss		uint64
+	casSucc		uint64
+}
+
+func (w * workerStat)Reset(){
+	w.casMiss = 0
+	w.casSucc = 0
+}
+
+func (w * workerStat) GetRate() float32{
+	total := float32(w.casMiss)+ float32(w.casSucc)
+	if total == 0 {
+		return 0
+	}
+	return float32(w.casMiss)*8/ total
+}
+
 type timerHot struct {
     lastDrainNano atomic.Int64
+	_ cachePad
 }
 
 type drainHot struct {
     batchInFlight atomic.Bool
+	_ cachePad
 }
 
 type submitHot struct {
@@ -118,6 +138,8 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 		idleWorkers:   make(chan WakeupWorker, opts.Workers),
 		workersActive: make([]atomic.Bool, opts.Workers),
 	}
+	p.meta.opts = opts
+
     switch opts.QT {
     case SegmentedQueue:
         p.queue = NewSegmentedQ[T](opts, nil)
@@ -135,8 +157,9 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 	for i := 0; i < opts.Workers; i++ {
 		p.wgWorkers.Add(1)
 		p.setWorkerState(i, true)
+		p.meta.wStats[i] = workerStat{}
 		go func(id int) {
-			p.batchWorker(id, &p.wgWorkers)
+			p.batchWorker(id, &p.wgWorkers, &p.meta.wStats[i])
 		}(i)
 	}
 
@@ -205,6 +228,7 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 
 	if pj >= p.meta.opts.WakeMinJobs {  
 			p.drain.batchInFlight.Store(true)
+			if p.needNewWorker(){
 				select {
 				case w := <-p.idleWorkers:
 					w <- struct{}{}
@@ -217,7 +241,7 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 	return nil
 }
 
-func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
+func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup, stat * workerStat) {
     defer func() {
         p.drain.batchInFlight.Store(false)
         p.setWorkerState(id, false)
@@ -241,12 +265,15 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
     }
 
     for {
+
+		stat.Reset()  // reset all stats before go to idle. for idling worker stats must be 0
+
         select {
         case <-wake:
         case <-p.doneCh:
             return
         }
-
+		
         for {
             if p.shutdown.Load() {
                 p.drain.batchInFlight.Store(false)
@@ -261,16 +288,17 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
                 if newPending < 0 {
                     p.submit.pendingJobs.Store(0)
                 }
-                p.timer.lastDrainNano.Store(time.Now().UnixNano())
-            }
-
+				stat.casSucc ++
+            }else{stat.casMiss ++}
+			
+			p.timer.lastDrainNano.Store(time.Now().UnixNano())
             p.drain.batchInFlight.Store(false)
 
-			if p.submit.pendingJobs.Load() > 0 {
-			    if p.drain.batchInFlight.CompareAndSwap(false, true) {
-			        continue
-			    }
-			}
+			//if p.submit.pendingJobs.Load() > 0 {
+			//    if p.drain.batchInFlight.CompareAndSwap(false, true) {
+			//        continue
+			//    }
+			//}
 			
             if p.shutdown.Load() {
                 return
@@ -310,21 +338,39 @@ func (p *Pool[T, M]) batchTimer() {
 			if !p.drain.batchInFlight.CompareAndSwap(false, true) {
 				continue
 			}
-
-			select {
-			case w := <-p.idleWorkers:
+			if p.needNewWorker(){
 				select {
-				case w <- struct{}{}:
+				case w := <-p.idleWorkers:
+					select {
+					case w <- struct{}{}:
+					default:
+					}
 				default:
+					p.drain.batchInFlight.Store(false)
 				}
-			default:
-				p.drain.batchInFlight.Store(false)
 			}
 
 		case <-p.doneCh:
 			return
 		}
 	}
+}
+
+func(p *Pool[T, M]) needNewWorker()bool{
+
+	totalMiss := float32(0)
+	totalSucc := float32(0)
+	for _, s := range(p.meta.wStats){
+		totalMiss += float32(s.casMiss)
+		totalSucc += float32(s.casSucc)
+
+	}
+	total := totalMiss + totalSucc
+	if total == 0 {
+		return true
+	}
+	missRate := totalMiss/total
+	return   missRate < 0.4
 }
 
 func (p *Pool[T, M]) Metrics() *M {
@@ -334,7 +380,7 @@ func (p *Pool[T, M]) Metrics() *M {
 }
 
 func (p *Pool[T, M])MetricsStr() string{
-	return p.metrics.String()  + fmt.Sprintf(", Penidng jobs: %d", p.submit.pendingJobs.Load()) + 
+	return p.meta.metrics.String()  + fmt.Sprintf(", Penidng jobs: %d", p.submit.pendingJobs.Load()) + 
 	fmt.Sprintf(", idle workers : %d", p.GetIdleLen()) + fmt.Sprintf(", active workers: %d", p.ActiveWorkers())
 }
 
