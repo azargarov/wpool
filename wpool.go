@@ -47,6 +47,21 @@ type drainHot struct {
 
 type submitHot struct {
     pendingJobs atomic.Int64
+	_  cachePad
+}
+
+type poolMeta [M MetricsPolicy]struct{
+		metrics       M
+		opts          Options
+
+		OnInternalError ErrorHandler
+		_ cachePad
+	    OnJobError     ErrorHandler
+		_ cachePad
+		metricsMu     sync.Mutex
+		_ cachePad
+
+		wStats       []workerStat
 }
 
 // Pool is a high-performance worker pool with batched scheduling.
@@ -58,43 +73,21 @@ type submitHot struct {
 //
 // The pool is safe for concurrent use.
 type Pool[T any, M MetricsPolicy] struct {
-	stopOnce      sync.Once
-	opts          Options
-	shutdown      atomic.Bool
-	doneCh        chan struct{}
-	metricsMu     sync.Mutex
-	metrics       M
-	queue         schedQueue[T]
-
-	// wakes is a per-worker wake-up channel.
-	wakes         []WakeupWorker
-
-	// idleWorkers tracks workers ready to accept work.	
-	idleWorkers   chan WakeupWorker
-
-	// workersActive marks whether a worker is currently alive.
-	workersActive []atomic.Bool
-
-	// pendingJobs is the global count of queued but unprocessed jobs.
-	//pendingJobs   atomic.Int64
-	submit 	submitHot
-	// batchInFlight ensures only one batch drain runs at a time.
-	//batchInFlight atomic.Bool
-	drain drainHot
-
-	// lastDrainNano tracks the last successful batch drain timestamp.
-	timer timerHot
-
-	wgWorkers   sync.WaitGroup
-
-	workersDone chan struct{}
-
-	// OnInternaError is called when the pool encounters
-	// an unexpected internal error.
-	OnInternalError ErrorHandler
-
-	// OnJobError is called when a job function returns an error.	
-	OnJobError     ErrorHandler
+	submit 			submitHot
+	shutdown      	atomic.Bool
+	_ 				cachePad
+	timer 			timerHot
+	drain 			drainHot
+	
+	idleWorkers   	chan WakeupWorker
+	queue         	schedQueue[T]
+	doneCh        	chan struct{}
+	wakes         	[]WakeupWorker
+	workersActive 	[]atomic.Bool
+	workersDone 	chan struct{}
+	stopOnce      	sync.Once
+	wgWorkers   	sync.WaitGroup
+	meta         	poolMeta[M]
 }
 
 func (p *Pool[T, M]) StatSnapshot() string{
@@ -121,7 +114,6 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
 	opts.FillDefaults()
 
 	p := &Pool[T, M]{
-		opts:          opts,
 		doneCh:        make(chan struct{}),
 		idleWorkers:   make(chan WakeupWorker, opts.Workers),
 		workersActive: make([]atomic.Bool, opts.Workers),
@@ -132,13 +124,14 @@ func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T
     case RevolvingBucketQueue:
         p.queue = NewRevolvingBucketQ[T](opts)
     }
-	p.metrics = metrics
+	p.meta.metrics = metrics
 	p.wakes = make([]WakeupWorker, opts.Workers)
 	for i := 0; i < opts.Workers; i++ {
 		p.wakes[i] = make(WakeupWorker, 1)
 	}
 
 	// Start workers.
+	p.meta.wStats = make([]workerStat,opts.Workers)
 	for i := 0; i < opts.Workers; i++ {
 		p.wgWorkers.Add(1)
 		p.setWorkerState(i, true)
@@ -199,10 +192,10 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 	}
 
 	pj := p.submit.pendingJobs.Add(1)
-	p.metrics.IncQueued()
+	p.meta.metrics.IncQueued()
 
 	if err := p.queue.Push(job); err != nil {
-	    p.metrics.BatchDecQueued(1)
+	    p.meta.metrics.BatchDecQueued(1)
 	    newPending := p.submit.pendingJobs.Add(-1)
 	    if newPending < 0 {
 	        p.submit.pendingJobs.Store(0)
@@ -210,7 +203,7 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 	    return err
 	}
 
-	if pj >= p.opts.WakeMinJobs {  
+	if pj >= p.meta.opts.WakeMinJobs {  
 			p.drain.batchInFlight.Store(true)
 				select {
 				case w := <-p.idleWorkers:
@@ -218,6 +211,7 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 				default:
 					p.drain.batchInFlight.Store(false)
 				}
+			}
 			
 	}
 	return nil
@@ -230,7 +224,7 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
         wg.Done()
     }()
 
-    if p.opts.PinWorkers {
+    if p.meta.opts.PinWorkers {
         runtime.LockOSThread()
         defer runtime.UnlockOSThread()
         if err := PinToCPU(id % runtime.NumCPU()); err != nil {
@@ -262,7 +256,7 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
             jobsNum := p.batchProcessJob()
 
             if jobsNum > 0 {
-                p.metrics.BatchDecQueued(jobsNum)
+                p.meta.metrics.BatchDecQueued(jobsNum)
 				newPending := p.submit.pendingJobs.Add(-int64(jobsNum))
                 if newPending < 0 {
                     p.submit.pendingJobs.Store(0)
@@ -300,19 +294,16 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup) {
 }
 
 func (p *Pool[T, M]) batchTimer() {
-	t := time.NewTicker(p.opts.FlushInterval)
+	t := time.NewTicker(p.meta.opts.FlushInterval)
 	defer t.Stop()
 
 	for {
 		select {
 		case <-t.C:
-			if p.shutdown.Load() {
-				return
-			}
-			if p.submit.pendingJobs.Load() == 0 {
+			if p.shutdown.Load() || p.submit.pendingJobs.Load() == 0 || len(p.idleWorkers) < p.meta.opts.Workers {
 				continue
 			}
-			if time.Since(time.Unix(0, p.timer.lastDrainNano.Load())) < p.opts.FlushInterval {
+			if time.Since(time.Unix(0, p.timer.lastDrainNano.Load())) < p.meta.opts.FlushInterval {
 				continue
 			}
 
@@ -337,9 +328,9 @@ func (p *Pool[T, M]) batchTimer() {
 }
 
 func (p *Pool[T, M]) Metrics() *M {
-	p.metricsMu.Lock()
-	defer p.metricsMu.Unlock()
-	return &p.metrics
+	p.meta.metricsMu.Lock()
+	defer p.meta.metricsMu.Unlock()
+	return &p.meta.metrics
 }
 
 func (p *Pool[T, M])MetricsStr() string{

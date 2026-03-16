@@ -8,8 +8,8 @@ import ()
 // worker setup issues or unexpected runtime conditions.
 // If no handler is registered, the error is silently ignored.
 func (p *Pool[T, M]) reportInternalError(e error) {
-	if p.OnInternalError != nil {
-		p.OnInternalError(e)
+	if p.meta.OnInternalError != nil {
+		p.meta.OnInternalError(e)
 	}
 }
 
@@ -19,7 +19,7 @@ func (p *Pool[T, M]) reportInternalError(e error) {
 // Job errors do not stop pool execution and are reported
 // asynchronously via the configured handler.
 func (p *Pool[T, M]) reportJobError(err error) {
-	if p.OnJobError != nil {
-		p.OnJobError(err)
+	if p.meta.OnJobError != nil {
+		p.meta.OnJobError(err)
 	}
 }

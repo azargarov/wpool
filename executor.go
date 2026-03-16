@@ -51,7 +51,7 @@ func (p *Pool[T, M]) runJob(j Job[T]) (err error) {
 	}
 
     // Count job execution regardless of outcome.
-	defer p.metrics.IncExecuted()
+	defer p.meta.metrics.IncExecuted()
 
 	if j.Fn == nil {
 		return ErrNilFunc
