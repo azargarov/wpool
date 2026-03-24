@@ -1,236 +1,127 @@
 package workerpool
 
 import (
-    "runtime"
-    "sync"
+	"sync"
 )
 
 type segmentPool[T any] struct {
-    pageSize uint32
-    maxKeep  int
+	pageSize uint32
+	maxKeep  int
 
-    hot  []*segment[T]      // Lock-free fast path via channels
-    cold []*segment[T]      // Mutex-protected overflow
-    mu   sync.Mutex
+	mu   sync.Mutex
+	head *segment[T]
+	kept int
 
-    // Fast paths
-    putCh    chan *segment[T]
-    getCh    chan *segment[T]
-    coldCh   chan *segment[T]
-    refillCh chan struct{}
+	metrics *segmentPoolMetrics
+	done    chan struct{}
 
-    prefetch int
-    metrics  *segmentPoolMetrics
-    done     chan struct{}
 }
 
 func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int, fastPut int, fastGet int) *segmentPool[T] {
-    if maxKeep <= 0 {
-        maxKeep = max(prefill*2, 64)
-    }
-    if prefill < 0 {
-        prefill = 4
-    }
-    if fastPut <= 0 {
-        fastPut = 1024
-    }
-    if fastGet <= 0 {
-        fastGet = 1024
-    }
+	if maxKeep <= 0 {
+		maxKeep = max(prefill*2, 64)
+	}
 
-    p := &segmentPool[T]{
-        pageSize: pageSize,
-        maxKeep:  maxKeep,
-        done:     make(chan struct{}),
-        hot:      make([]*segment[T], 0, prefill),
-        cold:     make([]*segment[T], 0, maxKeep),
-        putCh:    make(chan *segment[T], fastPut),
-        getCh:    make(chan *segment[T], fastGet),
-        refillCh: make(chan struct{}, 1),
-        coldCh:    make(chan *segment[T], maxKeep),
-        prefetch: 8,
-        metrics:  &segmentPoolMetrics{},
-    }
+	if prefill < 0 {
+		prefill = 0
+	}
+	if prefill > maxKeep {
+		prefill = maxKeep
+	}
 
-    // Prefill hot storage
-    for range prefill {
-        p.hot = append(p.hot, mkSegment[T](pageSize))
-    }
+	p := &segmentPool[T]{
+		pageSize: pageSize,
+		maxKeep:  maxKeep,
+		done:     make(chan struct{}),
+		metrics:  &segmentPoolMetrics{},
+	}
 
-    go p.run()
-    return p
+	for i := 0; i < prefill; i++ {
+		s := mkSegment[T](pageSize)
+
+		s.resetForUse()
+        w := s.loadWord()
+        s.casWord(w, withState(w,segDetached))
+        s.inPool.Store(true)
+		s.nextFree.Store(p.head)
+		p.head = s
+		p.kept++
+	}
+
+	return p
 }
 
 func (p *segmentPool[T]) Put(seg *segment[T]) {
-    if seg == nil {
-        return
-    }
-    // fast path 
-    select {
-    case p.putCh <- seg:
-        p.metrics.IncFastPutHit()
-        return
-    default:
-    }
+	if seg == nil {
+		return
+	}
 
-    //// buffered putCh
-    //select {
-    //case p.putCh <- seg:
-    //    p.metrics.IncFastPutToBuf()
-    //    return
-    //default:
-    //}
-
-    // mutex-protected cold storage 
-    p.mu.Lock()
-    defer p.mu.Unlock()
-
-    if len(p.cold) < p.maxKeep {
-        p.cold = append(p.cold, seg)
-        p.metrics.IncFastPutToBuf()
-        
-        select {
-        case p.refillCh <- struct{}{}:
-        default:
-        }
-    } else {
-        p.metrics.IncFastPutDrop()
+	if seg.refs.Load() != 0 {
+        panic("segmentPool.Put: segment with refs")
+	}
+    
+    if seg.loadWord().state() != segDetached {
+        panic("segmentPool.Put: non-detached segment")
     }
+	
+    if !seg.inPool.CompareAndSwap(false, true) {
+        return          // TODO: debug
+		panic("segmentPool.Put: double Put of same segment")
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.kept >= p.maxKeep {
+        seg.inPool.Store(false)
+		return
+	}
+
+	seg.nextFree.Store(p.head)
+	p.head = seg
+	p.kept++
 }
 
 func (p *segmentPool[T]) Get() *segment[T] {
-    return mkSegment[T](p.pageSize)
-    // fast path
-    select {
-    case seg := <-p.getCh:
-        r := seg.refs.Load()&refMask
-        if r != 0 {
-            panic("segment from pool has non-zero refs")
-        }
-        p.metrics.IncFastGetHit()
-        return seg
-    default:
-        p.metrics.IncFastGetMiss()
-    }
+    return mkSegment[T](p.pageSize)     // TODO: debug
+	p.mu.Lock()
+	h := p.head
+	if h != nil {
+		p.head = h.nextFree.Load()
+		h.nextFree.Store(nil)
+		p.kept--
+	}
+	p.mu.Unlock()
 
-    select {
-    case p.refillCh <- struct{}{}:
-        p.metrics.IncRefillSignal()
-    default:
-    }
+	if h == nil {
+		return mkSegment[T](p.pageSize)
+	}
 
-    for range 8 {
-        select {
-        case seg := <-p.getCh:
-            r := seg.refs.Load() & refMask
-            if r != 0 {
-                panic("segment from pool has non-zero refs")
-            }
-            p.metrics.IncFastGetHit()
-            return seg
-        default:
-            runtime.Gosched()
-        }
-    }
+	if !h.inPool.CompareAndSwap(true, false) {
+		panic("segmentPool.Get: popped segment not marked inPool")
+	}
 
-    //p.metrics.IncFallbackAlloc()
-    return mkSegment[T](p.pageSize)
-}
+	if h.loadWord().state() != segDetached {
+        println("segment state: ", h.loadWord().state())
+		panic("segmentPool.Get: freelist head is not detached")
+	}
+	if h.refs.Load() != 0 {
+		panic("segmentPool.Get: freelist head has non-zero refs")
+	}
 
-func (p *segmentPool[T]) adaptivePrefetch() int {
-    capacity := cap(p.getCh)
-    current := len(p.getCh)
-
-    if current < (capacity >> 2) {
-        return p.prefetch
-    }
-    return p.prefetch >> 1
-}
-
-func (p *segmentPool[T]) run() {
-    refill := func() {
-        p.metrics.IncRefillCall()
-
-        p.mu.Lock()
-        coldBatch := make([]*segment[T], len(p.cold))
-        copy(coldBatch, p.cold)
-        p.cold = p.cold[:0]
-        p.mu.Unlock()
-
-        for _, seg := range coldBatch {
-            select {
-            case p.getCh <- seg:
-                p.metrics.IncRefillFromFree()
-            case <-p.done:
-                return
-            default:
-                p.mu.Lock()
-                if len(p.hot) < p.maxKeep {
-                    p.hot = append(p.hot, seg)
-                }
-                p.mu.Unlock()
-                return
-            }
-        }
-
-        // hot storage
-        for range p.adaptivePrefetch() {
-            var seg *segment[T]
-
-            p.mu.Lock()
-            if len(p.hot) > 0 {
-                n := len(p.hot) - 1
-                seg = p.hot[n]
-                p.hot[n] = nil
-                p.hot = p.hot[:n]
-                p.mu.Unlock()
-                p.metrics.IncRefillFromFree()
-            } else {
-                p.mu.Unlock()
-                seg = mkSegment[T](p.pageSize)
-                p.metrics.IncRefillAllocated()
-            }
-
-            select {
-            case p.getCh <- seg:
-            case <-p.done:
-                return
-            default:
-                // getCh full, save for later
-                p.mu.Lock()
-                if len(p.hot) < p.maxKeep {
-                    p.hot = append(p.hot, seg)
-                }
-                p.mu.Unlock()
-                return
-            }
-        }
-    }
-
-    refill()
-
-    for {
-        select {
-        case <-p.done:
-            return
-
-        case seg := <-p.putCh:
-            p.mu.Lock()
-            if len(p.hot) < p.maxKeep {
-                p.hot = append(p.hot, seg)
-            }
-            p.mu.Unlock()
-
-        case <-p.refillCh:
-            refill()
-        }
-    }
+	h.resetForUse()
+	return h
 }
 
 func (p *segmentPool[T]) StatSnapshot() string {
-    return p.metrics.Snapshot().String()
+	return p.metrics.Snapshot().String()
 }
 
 func (p *segmentPool[T]) Close() {
-    close(p.done)
+	select {
+	case <-p.done:
+		return
+	default:
+		close(p.done)
+	}
 }

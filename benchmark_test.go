@@ -6,7 +6,6 @@ import (
 	"time"
 	"context"
 	"sync/atomic"
-	"math"
 	"sync"
 	"os"
 
@@ -105,10 +104,10 @@ func BenchmarkSegmentedQueue_PushPop(b *testing.B) {
 func BenchmarkRBQ_PushPop(b *testing.B) {
 	opts := defaultSegmentedOptions(runtime.GOMAXPROCS(0))
 	opts.QT = wp.RevolvingBucketQueue
-	opts.SegmentSize = 2048
-	opts.SegmentCount = 32
+	opts.SegmentSize = 64
+	opts.SegmentCount =32
 	opts.PoolCapacity = 256
-	opts.PinWorkers = true
+	opts.PinWorkers = false
 
 	q := wp.NewSegmentedQ[int](opts,nil)
 	job := wp.Job[int]{Fn: func(int) error { return nil }}
@@ -129,9 +128,9 @@ func BenchmarkRBQ_PushPop(b *testing.B) {
 }
 func BenchmarkPool_Single(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0) ) 
-	segSize := getenvInt("SEGSIZE",2048)
+	segSize := getenvInt("SEGSIZE",32)
 	segCount := getenvInt("SEGCOUNT", 32)
-	pinned := getenvInt("PINNED", 0) > 0
+	pinned := getenvInt("PINNED", 1) > 0
 	maxProducers := getenvInt("PRODUCERS", runtime.GOMAXPROCS(0)) 
 
 	cases := []struct {
@@ -143,8 +142,8 @@ func BenchmarkPool_Single(b *testing.B) {
 		work         func(any)error
 		queueType    wp.QueueType
 	}{
-		//{"RBQ/C8", workers, segSize, 32, pinned, emptyWork, wp.RevolvingBucketQueue},
-		{"SEGQ/C8", workers, segSize, segCount, pinned, emptyWork, wp.SegmentedQueue},
+		//{"RBQ/C8", workers, segSize, segCount, pinned, emptyWork, wp.RevolvingBucketQueue},
+		{"SEGQ/emptyWork", workers, segSize, segCount, pinned, emptyWork, wp.SegmentedQueue},
 	}
 
 	for _, tc := range cases {
@@ -181,8 +180,8 @@ func BenchmarkPool_Throughput(b *testing.B) {
 		//{"RBQ/C32 ", runtime.GOMAXPROCS(0), segSize, 32, false, wp.RevolvingBucketQueue},
 		//{"RBQ/C128", runtime.GOMAXPROCS(0), segSize, 128, false, wp.RevolvingBucketQueue},
 		//{"RBQ/C32P", runtime.GOMAXPROCS(0), segSize, 32, true, wp.RevolvingBucketQueue},
-		{"SEG/C8 ", runtime.GOMAXPROCS(0), segSize, 8, false, wp.SegmentedQueue},
-		{"SEG/C16 ", runtime.GOMAXPROCS(0), segSize, 16, false, wp.SegmentedQueue},
+		//{"SEG/C8 ", runtime.GOMAXPROCS(0), segSize, 8, false, wp.SegmentedQueue},
+		//{"SEG/C16 ", runtime.GOMAXPROCS(0), segSize, 16, false, wp.SegmentedQueue},
 		{"SEG/C32 ", runtime.GOMAXPROCS(0), segSize, 32, false, wp.SegmentedQueue},
 		{"SEG/C64 ", runtime.GOMAXPROCS(0), segSize, 64, false, wp.SegmentedQueue},
 	}
@@ -217,13 +216,12 @@ func runPoolThroughputBench(
 	maxProducers int32,
 	fn wp.JobFunc[any],
 ) {
-
 	opts := wp.Options{
 		Workers:      workers,
 		QT:           qt,
 		SegmentSize:  uint32(segSize),
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 512,
+		PoolCapacity: 128,
 		PinWorkers:   pinned,
 	}
 
@@ -231,70 +229,61 @@ func runPoolThroughputBench(
 		&wp.NoopMetrics{},
 		opts,
 	)
-	defer pool.Shutdown(context.Background())
 
-	//var executed atomic.Int64
-	
-	//var idGen atomic.Int64
-	
-	
+	var execWG sync.WaitGroup
+	execWG.Add(b.N)
+
 	jobFn := func(id int) error {
 		fn(0)
-	    return nil
+		execWG.Done()
+		return nil
 	}
-	
+
 	if os.Getenv("OBSERVER") == "1" {
 		done := make(chan struct{})
 		defer close(done)
 		go observer(5*time.Second, done, pool)
 	}
+
+	b.ReportAllocs()
 	b.ResetTimer()
 	start := time.Now()
-	b.ReportAllocs()
 
 	var submitted int64
 	var prodWG sync.WaitGroup
 
 	for i := 0; i < int(maxProducers); i++ {
-	    prodWG.Add(1)
-	    go func() {
-	        defer prodWG.Done()
-	        for {
-	            n := atomic.AddInt64(&submitted, 1)
-	            if n > int64(b.N) {
-	                return
-	            }
+		prodWG.Add(1)
+		go func() {
+			defer prodWG.Done()
+			for {
+				n := atomic.AddInt64(&submitted, 1)
+				if n > int64(b.N) {
+					return
+				}
 
-	            j := wp.Job[int]{Payload: 1, Fn: jobFn}
-	            j.SetPriority(1)
+				j := wp.Job[int]{Payload: 1, Fn: jobFn}
+				j.SetPriority(1)
 
-	            for {
-	                if err := pool.Submit(j); err == nil {
-	                    break
-	                }
-	                runtime.Gosched()
-	            }
-	        }
-	    }()
+				for {
+					if err := pool.Submit(j); err == nil {
+						break
+					}
+					runtime.Gosched()
+				}
+			}
+		}()
 	}
 
-    prodWG.Wait()
-	//println("b.N: ", b.N)
-	//waitUntilB(b, 30*time.Second, func() bool {
-	//	//println("Executed so far: ",executed.Load(), " b.N: ", b.N)
-	//	return executed.Load() == int64(b.N)
-	//})
-	//print("Executed: ",executed.Load(),"\n")
-	
+	prodWG.Wait()
+	execWG.Wait()
+
 	elapsed := time.Since(start)
-	secs := elapsed.Seconds()
+	b.StopTimer()
 
-	jobs := float64(b.N)
-	kjps := math.Round((jobs / secs)/1e3) 
+	_ = pool.Shutdown(context.Background())
 
-	//b.ReportMetric(jps/1e6, "Mj/s") 
-	b.ReportMetric(kjps, "kj/s") 
-	//b.ReportMetric((secs*1e9)/jobs, "ns/job")
+	b.ReportMetric(float64(b.N)/elapsed.Seconds()/1e3, "kj/s")
 }
 
 func observer(t time.Duration, done chan struct{} ,p *wp.Pool[int, *wp.NoopMetrics]){

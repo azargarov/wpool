@@ -20,6 +20,8 @@ const (
 	// batchTimerInterval is the periodic interval used by the batch timer
 	// to ensure progress even if no new submissions arrive.
 	defaultFlushInterval = 50 * time.Microsecond
+
+	missRateToThrottle = 0.4
 )
 
 var (
@@ -38,21 +40,22 @@ type ErrorHandler func(e error)
 type WakeupWorker chan struct{}
 
 type workerStat struct{
-	casMiss		uint64
-	casSucc		uint64
+	mu          sync.Mutex
+	casMiss		atomic.Uint64
+	casSucc		atomic.Uint64
 }
 
 func (w * workerStat)Reset(){
-	w.casMiss = 0
-	w.casSucc = 0
+	w.casMiss.Store(0)
+	w.casSucc.Store(0)
 }
 
 func (w * workerStat) GetRate() float32{
-	total := float32(w.casMiss)+ float32(w.casSucc)
+	total := float32(w.casMiss.Load())+ float32(w.casSucc.Load())
 	if total == 0 {
 		return 0
 	}
-	return float32(w.casMiss)*8/ total
+	return float32(w.casMiss.Load())/ total
 }
 
 type timerHot struct {
@@ -84,14 +87,6 @@ type poolMeta [M MetricsPolicy]struct{
 		wStats       []workerStat
 }
 
-// Pool is a high-performance worker pool with batched scheduling.
-//
-// It combines:
-//   - a lock-free / low-contention queue
-//   - explicit worker wake-ups
-//   - batching to amortize scheduling overhead
-//
-// The pool is safe for concurrent use.
 type Pool[T any, M MetricsPolicy] struct {
 	submit 			submitHot
 	shutdown      	atomic.Bool
@@ -114,7 +109,6 @@ func (p *Pool[T, M]) StatSnapshot() string{
 	return p.queue.StatSnapshot()
 }
 
-// GetIdleLen returns the number of currently idle workers.
 func (p *Pool[T, M]) GetIdleLen() int64 {
 	return int64(len(p.idleWorkers))
 }
@@ -129,13 +123,12 @@ func NewPool[M MetricsPolicy, T any](metrics M, opts ...Option) *Pool[T, M] {
 	return NewPoolFromOptions[M, T](metrics, o)
 }
 
-// NewPoolFromOptions creates a new Pool from a fully specified Options struct.
 func NewPoolFromOptions[M MetricsPolicy, T any](metrics M, opts Options) *Pool[T, M] {
 	opts.FillDefaults()
 
 	p := &Pool[T, M]{
 		doneCh:        make(chan struct{}),
-		idleWorkers:   make(chan WakeupWorker, opts.Workers),
+		idleWorkers:   make(chan WakeupWorker, opts.Workers ),
 		workersActive: make([]atomic.Bool, opts.Workers),
 	}
 	p.meta.opts = opts
@@ -214,29 +207,24 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 		}
 	}
 
-	pj := p.submit.pendingJobs.Add(1)
-	p.meta.metrics.IncQueued()
-
+	
 	if err := p.queue.Push(job); err != nil {
-	    p.meta.metrics.BatchDecQueued(1)
-	    newPending := p.submit.pendingJobs.Add(-1)
-	    if newPending < 0 {
-	        p.submit.pendingJobs.Store(0)
-	    }
-	    return err
+			return err
 	}
+		
+	p.meta.metrics.IncQueued()
+	pj := p.submit.pendingJobs.Add(1)
 
 	if pj >= p.meta.opts.WakeMinJobs {  
-			p.drain.batchInFlight.Store(true)
-			if p.needNewWorker(){
-				select {
-				case w := <-p.idleWorkers:
-					w <- struct{}{}
-				default:
+			if p.drain.batchInFlight.CompareAndSwap(false, true){
+				if p.needNewWorker(){
+					if !p.tryWakeOne(){
+						p.drain.batchInFlight.Store(false)
+					}
+				}else{
 					p.drain.batchInFlight.Store(false)
 				}
 			}
-			
 	}
 	return nil
 }
@@ -288,17 +276,18 @@ func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup, stat * workerStat) 
                 if newPending < 0 {
                     p.submit.pendingJobs.Store(0)
                 }
-				stat.casSucc ++
-            }else{stat.casMiss ++}
-			
+				stat.casSucc.Add(1) 
+			}else{
+				stat.casMiss.Add(1) 
+			}
+				
 			p.timer.lastDrainNano.Store(time.Now().UnixNano())
-            p.drain.batchInFlight.Store(false)
-
-			//if p.submit.pendingJobs.Load() > 0 {
-			//    if p.drain.batchInFlight.CompareAndSwap(false, true) {
-			//        continue
-			//    }
-			//}
+			p.drain.batchInFlight.Store(false)
+			if p.submit.pendingJobs.Load() > 0 {
+			    if p.drain.batchInFlight.CompareAndSwap(false, true) {
+			        continue
+			    }
+			}
 			
             if p.shutdown.Load() {
                 return
@@ -328,26 +317,23 @@ func (p *Pool[T, M]) batchTimer() {
 	for {
 		select {
 		case <-t.C:
-			if p.shutdown.Load() || p.submit.pendingJobs.Load() == 0 || len(p.idleWorkers) < p.meta.opts.Workers {
+			if p.shutdown.Load() || p.submit.pendingJobs.Load() == 0 || len(p.idleWorkers) == 0 {
 				continue
 			}
 			if time.Since(time.Unix(0, p.timer.lastDrainNano.Load())) < p.meta.opts.FlushInterval {
 				continue
 			}
-
+			
 			if !p.drain.batchInFlight.CompareAndSwap(false, true) {
 				continue
 			}
+
 			if p.needNewWorker(){
-				select {
-				case w := <-p.idleWorkers:
-					select {
-					case w <- struct{}{}:
-					default:
-					}
-				default:
+				if !p.tryWakeOne(){
 					p.drain.batchInFlight.Store(false)
 				}
+			}else{
+				p.drain.batchInFlight.Store(false)
 			}
 
 		case <-p.doneCh:
@@ -356,21 +342,34 @@ func (p *Pool[T, M]) batchTimer() {
 	}
 }
 
-func(p *Pool[T, M]) needNewWorker()bool{
+func (p *Pool[T, M]) tryWakeOne() bool {
+    select {
+    case w := <-p.idleWorkers:
+        select {
+        case w <- struct{}{}:
+			return true
+        default:
+			return false
+        }
+    default:
+		return false
+    }
+}
 
+func(p *Pool[T, M]) needNewWorker()bool{
+	
 	totalMiss := float32(0)
 	totalSucc := float32(0)
-	for _, s := range(p.meta.wStats){
-		totalMiss += float32(s.casMiss)
-		totalSucc += float32(s.casSucc)
-
+	for i := range p.meta.wStats {
+		totalMiss += float32(p.meta.wStats[i].casMiss.Load())
+		totalSucc += float32(p.meta.wStats[i].casSucc.Load())
 	}
 	total := totalMiss + totalSucc
 	if total == 0 {
 		return true
 	}
 	missRate := totalMiss/total
-	return   missRate < 0.4
+	return   missRate < missRateToThrottle
 }
 
 func (p *Pool[T, M]) Metrics() *M {
@@ -385,6 +384,7 @@ func (p *Pool[T, M])MetricsStr() string{
 }
 
 func (p *Pool[T, M])DebugHead() string{
+	println("inflight: ", p.drain.batchInFlight.Load())
 	return p.queue.DebugHead()
 }
 

@@ -23,7 +23,7 @@ var shaData = make([]byte, shaArrSize)
 func init() {
     shaData = make([]byte, shaArrSize)
     for i := range shaData {
-        shaData[i] = 0xFF
+        shaData[i] = 0xF0
     }
 }
 

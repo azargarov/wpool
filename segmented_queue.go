@@ -4,6 +4,7 @@ import (
 	"errors"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"fmt"
@@ -11,22 +12,15 @@ import (
 	"golang.org/x/sys/cpu"
 )
 
-const enableRecycle = false
-const maxSpinToYeld = 30
-const maxCASmissesBeforeGiveup = 8
 
+//func (q *segmentedQ[T]) tryReserve(seg *segment[T]) (slot segReserve, gen segGen, ok bool)
+//func (q *segmentedQ[T]) helpAdvanceTail(seg *segment[T])
 
 type cachePad = cpu.CacheLinePad
 
 const (
-	// DefaultSegmentSize is the default number of jobs per segment.
-	// It should be large enough to amortize allocation costs but
-	// small enough to fit comfortably in cache.
 	DefaultSegmentSize = 4096
-
 	DefaultFastPutGet = 4096
-	detachedMask uint64 = 1 << 63
-	refMask      uint64 = ^detachedMask
 )
 
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
@@ -34,31 +28,33 @@ var (
 	segErrorNilSegment = errors.New("NULL segment")
 )
 type producerView struct {
-	tail    	uint32
-	_   cachePad
-	reserve 	uint32
-	_   cachePad
+	tail    	atomic.Uint32
 }
 
 type consumerView struct {
-	head 		uint32
-	_ cachePad
+	head 		atomic.Uint32
 }
 
 type segment[T any] struct {
-	gen      	atomic.Uint32
-	_ cachePad
-	refs 		atomic.Uint64
+	nextFree atomic.Pointer[segment[T]]
+
+	state		atomic.Uint64
+
+	refs 		atomic.Int64  //number of c/p referencing to segment + detached bin 63
+	_    cachePad
 
 	producer 	producerView
-	_ cachePad   // ?
-
+	
 	consumer 	consumerView
-
+	
 	next  		atomic.Pointer[segment[T]]
-
+	
 	ready 		[]uint32
 	buf   		[]Job[T]
+
+	mu 			sync.Mutex   // TODO: DEBUG
+
+	inPool atomic.Bool		// TODO: DEBUG
 }
 
 type segmentedQ[T any] struct {
@@ -74,9 +70,20 @@ func mkSegment[T any](segSize uint32) *segment[T] {
 		buf:   make([]Job[T], segSize),
 		ready: make([]uint32, segSize),
 	}
-	seg.gen.Store(1)
+	seg.refs.Store(int64(0))
+	seg.state.Store( uint64(segReset( seg.loadWord() ) ))
 	return &seg
 }
+
+
+func (s *segment[T]) loadWord() segWord {
+	return segWord(s.state.Load())
+}
+
+func (s *segment[T]) casWord(old, new segWord) bool {
+	return s.state.CompareAndSwap(uint64(old), uint64(new))
+}
+
 
 func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmentedQ[T] {
 	q := &segmentedQ[T]{pageSize: opts.SegmentSize}
@@ -85,15 +92,14 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 	if capacity <= 0 {
 		capacity = opts.SegmentCount * 4
 	}
-	if spool == nil{
+	if spool == nil{					//next = seg.next.Load()
 		q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(capacity), DefaultFastPutGet, DefaultFastPutGet) 
 	} else {
 		q.pool = spool
 	}
 
 	first := q.pool.Get()
-	atomic.StoreUint32(&first.consumer.head, 0)
-	atomic.StoreUint32(&first.producer.reserve, 0)
+	first.consumer.head.Store(0)
     
 	first.resetForUse()
 	
@@ -111,139 +117,153 @@ func (q *segmentedQ[T])Close() {
 }
 
 func (q *segmentedQ[T]) Push(v Job[T]) error {
-	spins:=0
 	for {
-		spins ++
-		if spins%maxSpinToYeld ==0 {
-			runtime.Gosched()
-		}
+	    seg := q.tail.Load()
+    	if seg == nil {
+    	    return segErrorNilSegment
+    	}
 
-		seg := q.tail.Load()
-		if seg == nil {
-			return segErrorNilSegment
-		}
-		
-		if !seg.tryAddRefProducer() {
-			// detached; help tail advance
-			next := seg.next.Load()
-			if next != nil { 
-				q.tail.CompareAndSwap(seg, next) 
-			}
+		word := seg.loadWord()
+    
+		if word.state() != segOpen {
+
+    	    next := seg.next.Load()
+    	    if next == nil {
+    	        newSeg := q.pool.Get()
+    	        if !seg.next.CompareAndSwap(nil, newSeg) {
+    	            //q.pool.Put(newSeg)		// TODO: DEBUG, normally the segment should be returned to the pool
+					continue
+    	        }
+    	    }
+
+    	    q.tail.CompareAndSwap(seg, seg.next.Load())
+    	    runtime.Gosched()
+    	    continue
+    	}
+
+		gen, ok := seg.tryAddRef(true);
+		if !ok{
+			runtime.Gosched()
 			continue
 		}
-		//double check tail
-		//if q.tail.Load() != seg{
-		//	seg.releaseRef()
-		//	runtime.Gosched()
-		//	continue
-		//}
-		g := seg.gen.Load()
-		for {
-			r := atomic.LoadUint32(&seg.producer.reserve)
-			if r >= q.pageSize {
-				break
-			}
-			if atomic.CompareAndSwapUint32(&seg.producer.reserve, r, r+1) {
-				seg.buf[r] = v
-				atomic.StoreUint32(&seg.ready[r], g)
-				seg.releaseRef()
-				return nil
-			}
+
+		word = seg.loadWord()
+    	if word.state() != segOpen {
+    	    q.releaseRef(seg)
+    	    continue
+    	}
+
+		r := word.reserve()
+
+		if r >= segReserve(q.pageSize) {
+		    seg.casWord(word, segToClosed(word))
+		
+		    next := seg.next.Load()
+		    if next == nil {
+		        newSeg := q.pool.Get()
+		        if seg.next.CompareAndSwap(nil, newSeg) {
+					next = newSeg
+				} else {
+		            //q.pool.Put(newSeg)  /// TODO: DEBUG, normally the segment should be returned to the pool
+		            next = seg.next.Load()
+		        }
+		    }
+		    q.tail.CompareAndSwap(seg, next)
+		    q.releaseRef(seg)
+		    continue
 		}
 
-		next := seg.next.Load()
-		if next == nil {
-			newSeg := q.pool.Get()
-			newSeg.resetForUse()
-			if seg.next.CompareAndSwap(nil, newSeg) {
-				next = newSeg
-			} else {
-				q.pool.Put(newSeg)
-				next = seg.next.Load()
-			}
-		}
-
-		q.tail.CompareAndSwap(seg, next)
-		seg.releaseRef() 
+	    newWord := incReserve( word )
+	    if !seg.casWord(word, newWord) {
+			q.releaseRef(seg)
+	        continue
+	    }
+	    seg.buf[r] = v
+	    atomic.StoreUint32(&seg.ready[r],  uint32(gen))
+		q.releaseRef(seg)
+	    return nil
 	}
 }
 
 func (q *segmentedQ[T]) BatchPop() (Batch[T], bool) {
-	spins:=0
-
 	for {
-		spins ++
-		if spins >= maxCASmissesBeforeGiveup {
+        seg := q.head.Load()
+        if seg == nil {
 			return Batch[T]{}, false
-		}
-
-		seg := q.head.Load()
-		if seg == nil {
-			return Batch[T]{}, false
-		}
-
-		if !seg.tryAddRefConsumer() {
+        }
+		
+		gen, ok := seg.tryAddRef(false);
+		if !ok{
+			runtime.Gosched()
 			continue
 		}
-
-		h := atomic.LoadUint32(&seg.consumer.head)
-		r := atomic.LoadUint32(&seg.producer.reserve)
-		g := seg.gen.Load()
-
-		end := h
-		for end < min(r, q.pageSize) && atomic.LoadUint32(&seg.ready[end]) == g {
+        word := seg.loadWord()
+        state := word.state()
+        reserve := uint32(word.reserve())
+		
+        h := seg.consumer.head.Load()
+		
+        end := h
+        for end < reserve && atomic.LoadUint32(&seg.ready[end]) == uint32(gen) {
 			end++
+        }
+		
+        if end > h {
+			
+			if seg.consumer.head.CompareAndSwap(h, end) {
+				return Batch[T]{Jobs: seg.buf[h:end], Seg: seg, End: end}, true
+            }
+			
+			q.releaseRef(seg)
+            continue
+        }
+		
+        if state == segOpen {
+			if reserve >= q.pageSize {
+				seg.casWord(word, segToClosed(word))
+            }
+			q.releaseRef(seg)
+            return Batch[T]{}, false
+        }
+		
+		if h == reserve {
+			next := seg.next.Load()
+			
+		    if state == segClosed {
+				if next == nil {
+					q.releaseRef(seg)
+		            return Batch[T]{}, false
+		        }
+				
+		        moved := q.head.CompareAndSwap(seg, next)
+		        if moved || q.head.Load() != seg {
+					for {
+						old := seg.loadWord()
+		                if old.state() != segClosed {
+							break
+		                }
+		                if seg.casWord(old, segToDetach(old)) {
+							break
+		                }
+		            }
+		        }
+				
+				q.releaseRef(seg)
+		        continue
+		    }
+			
+		    if state == segDetached {
+				if next == nil {
+					q.releaseRef(seg)
+		            return Batch[T]{}, false
+		        }
+			
+		        q.head.CompareAndSwap(seg, next)
+				q.releaseRef(seg)
+		        continue
+		    }
 		}
-		if end > h{
-			cur := atomic.LoadUint32(&seg.consumer.head)
-			if cur != h {
-			    seg.releaseRef()
-			    continue
-			}
-
-			if atomic.CompareAndSwapUint32(&seg.consumer.head, h, end) {
-			    seg.releaseRef()
-			    return Batch[T]{Jobs: seg.buf[h:end], Seg: seg, End: end}, true
-			}
-
-			seg.releaseRef()
-			continue
-		}
-
-		if h < min(r, q.pageSize) {
-			seg.releaseRef()
-			continue
-		}
-
-		next := seg.next.Load()
-		if next != nil {
-			// Revalidate with a fresh reserve snapshot before skipping this segment.
-			r2 := atomic.LoadUint32(&seg.producer.reserve)
-			if h < min(r2, q.pageSize) {
-				seg.releaseRef()
-				continue
-			}
-
-			if q.head.Load() != seg{		//TTAS - compare before swap
-				seg.releaseRef()
-				continue
-			}
-			if q.head.CompareAndSwap(seg,next){
-				seg.detach()
-			}
-
-			seg.releaseRef()
-			continue
-		}
-
-		if q.tail.Load() != seg {
-			seg.releaseRef()
-			continue
-		}
-
-		seg.releaseRef()
-		return Batch[T]{}, false
-	}
+    }
 }
 
 func (q *segmentedQ[T]) OnBatchDone(b Batch[T]) {
@@ -252,187 +272,113 @@ func (q *segmentedQ[T]) OnBatchDone(b Batch[T]) {
 	if seg == nil {
 		return
 	}
-	//n := seg.consumer.inflight.Add(-1)
-
-	//if n < 0 {
-	//	panic("Inflight went negative")
-	//}
-	q.tryRecycle(seg)
+	q.releaseRef(seg)
 }
 
-func (s *segment[T]) tryAddRefProducer() bool {
-	spins:=0
-	for {
-		r := s.refs.Load()
-		
-        // already detached
-        if r&detachedMask != 0 {
-			return false
-        }
-		if s.refs.Load() == r{
-			if s.refs.CompareAndSwap(r, r+1) {
-				return true
-			}
-		}
-		spins++
-		if spins%maxSpinToYeld == 0{
-			runtime.Gosched()
-		}
+func (s *segment[T]) tryAddRef(producer bool) (segGen, bool) {
+	// TODO: for debugging
+	//s.mu.Lock()
+	//defer s.mu.Unlock()
+
+
+    w1 := s.loadWord()
+    st := w1.state()
+
+    if (producer && st != segOpen) || st == segDetached {
+        return 0, false
     }
+
+    g := w1.gen()
+
+    s.refs.Add(1)
+    w2 := s.loadWord()
+    
+	if w2.gen() == g && w2.state() != segDetached {
+        return g, true
+    }
+
+    s.refs.Add(-1)
+    return 0, false
+}
+ 
+func (q *segmentedQ[T]) releaseRef(s *segment[T]) {
+	r := s.refs.Add(-1)
+	if r < 0 {
+		print(q.DebugHead())
+		panic("negative refs")
+	}
+	if r != 0 {
+		return
+	}
+
+	//q.tryRecycle(s) // TODO: commented for memory recalamation disabling, debugging
 }
 
-func (s *segment[T]) tryAddRefConsumer() bool {
-	spins:=0
-    for {
-        r := s.refs.Load()
-        count := r & refMask
+func (q *segmentedQ[T]) tryRecycle(s *segment[T]) {
+	// TODO: for debugging
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-		if count == refMask { 
-            panic("refcount overflow")
-        }
-
-        newVal := (r & detachedMask) | (count + 1)
-		if s.refs.Load() == r {
-			if s.refs.CompareAndSwap(r, newVal) {
-				return true
-			}
-		}
-
-		spins++
-        if spins%maxSpinToYeld == 0 {
-            runtime.Gosched()
-        }
-    }
-}
-
-func (s *segment[T]) releaseRef() {
-    //if !enableRecycle {return}
-	spins:=0
-	for {
-		r := s.refs.Load()
-		
-        count := r & refMask
-		
-        newVal := (r & detachedMask) | (count - 1)
-		
-		if s.refs.Load() == r{
-			if s.refs.CompareAndSwap(r, newVal) {
-				return
-			}
-		}
-
-		spins++
-		if spins%maxSpinToYeld == 0{
-			runtime.Gosched()
-		}
-    }
-}
-
-func (s *segment[T]) reclaimable() bool {
-    refs := s.refs.Load()
-    return refs&detachedMask != 0 &&
-           refs&refMask == 0 //&&
-           //s.consumer.inflight.Load() == 0
-}
-
-func (s *segment[T]) detach() {
-	if !enableRecycle { return }
-	s.refs.Or(detachedMask)
-}
-
-func (q *segmentedQ[T]) tryRecycle(seg *segment[T]) {
-	//if !enableRecycle { return } 
-    //if seg.consumer.inflight.Load() != 0 {
-	//	return
-    //}
-
-    if q.head.Load() == seg || q.tail.Load() == seg {
-        return
-    }
-
-    r := seg.refs.Load()
-    // must be detached
-    if r&detachedMask == 0 ||r&refMask != 0  {
-        return
-    }
-
-	atomic.StoreUint32(&seg.consumer.head, 0)
-    atomic.StoreUint32(&seg.producer.reserve, 0)
-    seg.next.Store(nil)
-    //seg.inflight.Store(0)
-
-    newGen := seg.gen.Add(1)
-    if newGen == 0 {
-        seg.gen.Store(1)
-    }
-
-    // Reset refs to attached, zero count
-    seg.refs.Store(detachedMask)
-    q.pool.Put(seg)
+	if s == nil {
+		return
+	}
+	if s.refs.Load() != 0 {
+		return
+	}
+	if s.loadWord().state() != segDetached {
+		return
+	}
+	if q.head.Load() == s || q.tail.Load() == s {
+		return
+	}
+	
+	s.next.Store(nil)
+	q.pool.Put(s)
 }
 
 func (s *segment[T]) resetForUse() {
-    atomic.StoreUint32(&s.consumer.head, 0)
-    atomic.StoreUint32(&s.producer.reserve, 0)
+    s.consumer.head.Store(0)
+    s.producer.tail.Store(0)
     s.next.Store(nil)
-    //s.consumer.inflight.Store(0)
-    s.refs.Store(0) 
-	newGen := s.gen.Add(1)
-    if newGen == 0 {
-        s.gen.Store(1)
-    }
+    s.refs.Store(int64(0)) 
+	s.casWord(s.loadWord(),segReset(s.loadWord()))
 }
 
 func (q *segmentedQ[T]) Len() int {
-    total := 0
-    seg := q.head.Load()
-    
-    for seg != nil && total < 1000 { 
-        h := atomic.LoadUint32(&seg.consumer.head)
-        r := atomic.LoadUint32(&seg.producer.reserve)
-        total += int(r - h)
-        
-        seg = seg.next.Load()
-    }
-    return total
+    return 0
 }
 
-// MaybeHasWork performs a fast, approximate check for available work.
 func (q *segmentedQ[T]) MaybeHasWork() bool {
 	seg := q.head.Load()
 	if seg == nil {
 		return false
 	}
-	h := atomic.LoadUint32(&seg.consumer.head)
-	r := atomic.LoadUint32(&seg.producer.reserve)
+	h := uint32(seg.consumer.head.Load())
+	r:= uint32(seg.loadWord().reserve())
 	return r > h || seg.next.Load() != nil
 }
 
 func (q *segmentedQ[T]) DebugHead() string {
     head := q.head.Load()
     tail := q.tail.Load()
+	headWord := head.loadWord()
     
-    h := atomic.LoadUint32(&head.consumer.head)
-    r := atomic.LoadUint32(&head.producer.reserve)
-    g := head.gen.Load()
+    h := head.consumer.head.Load()
+    r := head.loadWord().reserve()
+    g := headWord.gen()//head.gen.Load()
     next := head.next.Load()
     refs := head.refs.Load()
-    //inflight := head.consumer.inflight.Load()
 
-    //tr := atomic.LoadUint32(&tail.producer.reserve)
-    //tg := tail.gen.Load()
-    //trefs := tail.refs.Load()
     
 	tailNext := tail.next.Load()
 	var res strings.Builder
-	fmt.Fprintf(&res, "head: h=%d r=%d g=%d refs=%d inflight=%d next==nil=%v tailNext==nil=%v tail==head=%v",
-	h, r, g, refs, -1, next == nil, tailNext == nil, tail == head)
+	fmt.Fprintf(&res, "head: h=%d r=%d g=%d refs=%d  next==nil=%v tailNext==nil=%v tail==head=%v  headWord=%b\n",
+	h, r, g, refs, next == nil, tailNext == nil, tail == head, headWord)
 	
-	//fmt.Fprintf(&res, " ready= %v", head.ready)
 	res .WriteString(" ready=[")
 	for i := range r {
 	    fmt.Fprintf(&res, "%d:%d ", i, atomic.LoadUint32(&head.ready[i]))
 	}
-	res .WriteString("]")
+	res .WriteString("]\n")
 	return res.String() 
 }
