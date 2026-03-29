@@ -2,21 +2,16 @@
 
 package workerpool
 
-type segmentPoolMetricsSnapshot struct {}
+type segmentPoolMetricsSnapshot struct{}
 
 type segmentPoolMetrics struct{}
-func (m *segmentPoolMetrics) IncFastGetHit() {}
-func (m *segmentPoolMetrics) IncFastGetMiss() {}
-func (m *segmentPoolMetrics) IncFallbackAlloc() {}
-func (m *segmentPoolMetrics) IncFastPutHit() {}
-func (m *segmentPoolMetrics) IncFastPutToBuf() {}
-func (m *segmentPoolMetrics) IncFastPutDrop() {}
-func (m *segmentPoolMetrics) IncRefillSignal() {}
-func (m *segmentPoolMetrics) IncRefillCall() {}
-func (m *segmentPoolMetrics) IncRefillFromFree() {}
-func (m *segmentPoolMetrics) IncRefillAllocated() {}
-func (m *segmentPoolMetrics) Reset() {}
+
+func (m *segmentPoolMetrics) IncAllocated() {}
+func (m *segmentPoolMetrics) IncReused() {}
+func (m *segmentPoolMetrics) IncPut() {}
+func (m *segmentPoolMetrics) IncPutAttempt() {}
+func (m *segmentPoolMetrics) Reset()              {}
 func (m *segmentPoolMetrics) Snapshot() segmentPoolMetricsSnapshot {
 	return segmentPoolMetricsSnapshot{}
 }
-func (s segmentPoolMetricsSnapshot) String() string {return ""}
+func (s segmentPoolMetricsSnapshot) String() string { return "" }

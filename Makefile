@@ -74,7 +74,7 @@ perf:
 		-e branches,branch-misses \
 		-e stalled-cycles-backend \
 		-e cpu/event=0xcd,umask=0x01/ \
-		go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem -count=4
+		go test $(TEST_PKG) -run=^$$ -bench=$(BENCH_SINGLE) -benchmem -count=6
 
 clean:
 	rm -f $(TEST_OUT)/*

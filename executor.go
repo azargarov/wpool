@@ -32,7 +32,7 @@ func (p *Pool[T, M]) runBatch(jobs []Job[T]) {
 //   - execution metrics are updated exactly once
 func (p *Pool[T, M]) runJob(j Job[T]) (err error) {
 
-	if meta := j.Meta; meta != nil{
+	if meta := j.Meta; meta != nil {
 		if meta.Ctx != nil {
 			select {
 			case <-meta.Ctx.Done():
@@ -50,7 +50,7 @@ func (p *Pool[T, M]) runJob(j Job[T]) (err error) {
 		}
 	}
 
-    // Count job execution regardless of outcome.
+	// Count job execution regardless of outcome.
 	defer p.meta.metrics.IncExecuted()
 
 	if j.Fn == nil {
@@ -71,16 +71,13 @@ func (p *Pool[T, M]) runJob(j Job[T]) (err error) {
 // and executes them until no more work is available.
 //
 // It returns the total number of jobs processed.
-func (p *Pool[T, M]) batchProcessJob() int64 {
+func (p *Pool[T, M]) batchProcessJob(b *Batch[T]) int64 {
 	var counter int64
 	for {
-		batch, ok := p.queue.BatchPop()
-		if !ok {
-			return counter
-		}
-
-		p.runBatch(batch.Jobs)
-		counter += int64(len(batch.Jobs))
-		p.queue.OnBatchDone(batch)
+		if !p.queue.BatchPop(b) { return counter }
+		
+		p.runBatch(b.Jobs)
+		counter += int64(len(b.Jobs))
+		p.queue.OnBatchDone(b)
 	}
 }

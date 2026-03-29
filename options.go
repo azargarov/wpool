@@ -21,7 +21,7 @@ const (
 	// and batch-oriented consumption.
 	SegmentedQueue QueueType = iota
 
-	RevolvingBucketQueue	
+	RevolvingBucketQueue
 )
 
 // Options configure the behavior of a worker Pool.
@@ -130,11 +130,11 @@ func (o *Options) FillDefaults() {
 		o.SegmentCount = DefaultSegmentCount
 	}
 	if o.WakeMinJobs == 0 {
-    	o.WakeMinJobs= defaultWakeMinJobs
+		o.WakeMinJobs = defaultWakeMinJobs
 	}
-		
+
 	if o.FlushInterval == 0 {
-    	o.FlushInterval= defaultFlushInterval
+		o.FlushInterval = defaultFlushInterval
 	}
 }
 

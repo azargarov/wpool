@@ -25,7 +25,6 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 	}
 }
 
-
 func TestPool_ExactOnce_Bursty(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
@@ -43,7 +42,13 @@ func TestPool_ExactOnce_Bursty(t *testing.T) {
 		&wp.AtomicMetrics{},
 		opts,
 	)
-	defer pool.Shutdown(context.Background())
+	//defer pool.Shutdown(context.Background())
+
+	defer func() {
+		if err := pool.Shutdown(context.Background()); err != nil {
+			t.Errorf("pool shutdown failed: %v", err)
+		}
+	}()
 
 	const rounds = 20_000
 	seen := make([]atomic.Uint32, rounds*3)
@@ -144,7 +149,13 @@ func TestPool_ExactOnce_SmallSegments(t *testing.T) {
 				&wp.AtomicMetrics{},
 				opts,
 			)
-			defer pool.Shutdown(context.Background())
+			//defer pool.Shutdown(context.Background())
+
+			defer func() {
+				if err := pool.Shutdown(context.Background()); err != nil {
+					t.Errorf("pool shutdown failed: %v", err)
+				}
+			}()
 
 			seen := make([]atomic.Uint32, tc.n)
 			var submitted atomic.Int64
@@ -264,7 +275,13 @@ func TestPool_SubmitCompletes_SmallSegments(t *testing.T) {
 	}
 
 	pool := wp.NewPoolFromOptions[*wp.AtomicMetrics, int](&wp.AtomicMetrics{}, opts)
-	defer pool.Shutdown(context.Background())
+	//defer pool.Shutdown(context.Background())
+
+	defer func() {
+		if err := pool.Shutdown(context.Background()); err != nil {
+			t.Errorf("pool shutdown failed: %v", err)
+		}
+	}()
 
 	const n = 100_000
 	const producers = 16

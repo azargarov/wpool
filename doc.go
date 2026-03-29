@@ -1,7 +1,7 @@
 // Package workerpool provides high-performance concurrency primitives
 // for building scalable worker pools and schedulers.
 //
-// Design goals
+// # Design goals
 //
 // The package is designed around the following principles:
 //
@@ -14,24 +14,24 @@
 // workerpool optimizes for sustained throughput and stability
 // when handling large volumes of short-lived jobs.
 //
-// Architecture overview
+// # Architecture overview
 //
 // The worker pool is composed of three loosely coupled layers:
 //
-//   1. Scheduling (schedQueue)
-//      Responsible for ordering, batching, and dequeuing jobs.
-//      Different queue implementations may be plugged in without
-//      modifying the pool or worker logic.
+//  1. Scheduling (schedQueue)
+//     Responsible for ordering, batching, and dequeuing jobs.
+//     Different queue implementations may be plugged in without
+//     modifying the pool or worker logic.
 //
-//   2. Execution (Pool / workers)
-//      Workers fetch batches of jobs and execute them sequentially.
-//      Parallelism is achieved across workers, not within a batch.
+//  2. Execution (Pool / workers)
+//     Workers fetch batches of jobs and execute them sequentially.
+//     Parallelism is achieved across workers, not within a batch.
 //
-//   3. Job lifecycle
-//      Jobs carry their payload, execution function, optional context,
-//      and optional cleanup logic.
+//  3. Job lifecycle
+//     Jobs carry their payload, execution function, optional context,
+//     and optional cleanup logic.
 //
-// Batching model
+// # Batching model
 //
 // Jobs are dequeued in batches to amortize scheduling overhead such as
 // atomic operations, cache misses, and worker wake-ups.
@@ -45,7 +45,7 @@
 // Parallelism is achieved by running multiple workers concurrently,
 // each processing its own batches.
 //
-// Queue design
+// # Queue design
 //
 // The default scheduler uses a lock-free segmented FIFO queue.
 // Jobs are stored in fixed-size segments linked together dynamically.
@@ -60,7 +60,7 @@
 // The queue design is optimized for workloads with many producers
 // and relatively small, fast jobs.
 //
-// Error handling
+// # Error handling
 //
 // The pool distinguishes between two classes of errors:
 //
@@ -71,7 +71,7 @@
 // worker execution. Panics inside jobs are recovered to prevent
 // worker termination.
 //
-// CPU pinning
+// # CPU pinning
 //
 // On Linux, workers may optionally be pinned to specific CPUs.
 // When enabled, workers are locked to OS threads and restricted
@@ -80,7 +80,7 @@
 // This can improve cache locality and reduce scheduler-induced
 // migration for CPU-bound workloads, but is not universally beneficial.
 //
-// Intended use cases
+// # Intended use cases
 //
 // workerpool is well suited for:
 //
@@ -92,7 +92,7 @@
 // It is not intended as a general-purpose goroutine replacement
 // or for workloads dominated by blocking I/O.
 //
-// Extensibility
+// # Extensibility
 //
 // The scheduling layer is intentionally abstracted to allow
 // experimentation with alternative queue designs, such as:

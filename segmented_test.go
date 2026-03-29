@@ -11,7 +11,6 @@ import (
 	wp "github.com/azargarov/wpool"
 )
 
-
 func firstBadIDsAtomic(seen []atomic.Uint32, want uint32, limit int) []string {
 	out := make([]string, 0, limit)
 	for id := range seen {
@@ -101,6 +100,8 @@ func TestSegmentedQueue_ExactOnce_MPMC(t *testing.T) {
 					defer prodWG.Done()
 					<-start
 
+
+
 					for id := from; id < to; id++ {
 						j := wp.Job[int]{
 							Payload: id,
@@ -122,6 +123,9 @@ func TestSegmentedQueue_ExactOnce_MPMC(t *testing.T) {
 					defer consWG.Done()
 					<-start
 
+					batch := wp.Batch[int]{}
+					batch.Jobs =  make([]wp.Job[int],0,128)
+					
 					for {
 						// Fast exit: all jobs consumed.
 						if consumed.Load() >= int64(tc.n) {
@@ -134,7 +138,7 @@ func TestSegmentedQueue_ExactOnce_MPMC(t *testing.T) {
 						default:
 						}
 
-						batch, ok := q.BatchPop()
+						ok := q.BatchPop(&batch)
 						if !ok {
 							runtime.Gosched()
 							continue
@@ -154,7 +158,7 @@ func TestSegmentedQueue_ExactOnce_MPMC(t *testing.T) {
 							consumed.Add(1)
 						}
 
-						q.OnBatchDone(batch)
+						q.OnBatchDone(&batch)
 					}
 				}()
 			}
@@ -219,6 +223,8 @@ func TestSegmentedQueue_ExactOnce_Bursty(t *testing.T) {
 		SegmentCount: 1,
 		PoolCapacity: 512,
 	}
+	
+
 
 	q := wp.NewSegmentedQ[int](opts, nil)
 	defer q.Close()
@@ -238,11 +244,15 @@ func TestSegmentedQueue_ExactOnce_Bursty(t *testing.T) {
 	}
 
 	var consWG sync.WaitGroup
-	for i := 0; i < 16; i++ {
+	for range 16 {
 		consWG.Add(1)
 		go func() {
 			defer consWG.Done()
 			for {
+				
+				batch := wp.Batch[int]{}
+				batch.Jobs =  make([]wp.Job[int],0,opts.SegmentSize)
+
 				if consumed.Load() >= total {
 					return
 				}
@@ -252,7 +262,7 @@ func TestSegmentedQueue_ExactOnce_Bursty(t *testing.T) {
 				default:
 				}
 
-				batch, ok := q.BatchPop()
+				ok := q.BatchPop(&batch)
 				if !ok {
 					runtime.Gosched()
 					continue
@@ -266,7 +276,7 @@ func TestSegmentedQueue_ExactOnce_Bursty(t *testing.T) {
 					}
 					consumed.Add(1)
 				}
-				q.OnBatchDone(batch)
+				q.OnBatchDone(&batch)
 			}
 		}()
 	}

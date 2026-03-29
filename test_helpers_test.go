@@ -1,66 +1,67 @@
 package workerpool_test
 
-import(
+import (
+	"crypto/sha256"
+	"os"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
-	"os"
-	"strconv"
-	"crypto/sha256"
-    //"encoding/binary"
+	//"encoding/binary"
 	wp "github.com/azargarov/wpool"
 )
 
 type workload struct {
-    name string
-    fn   wp.JobFunc[any]
+	name string
+	fn   wp.JobFunc[any]
 }
 
-
-//var shaData = []byte("1234 deterministic payloadsome deterministic payloadsome deterministic payloadsome deterministic payload")
+// var shaData = []byte("1234 deterministic payloadsome deterministic payloadsome deterministic payloadsome deterministic payload")
 const shaArrSize = 8 * 1024
-var shaData = make([]byte, shaArrSize)
-func init() {
-    shaData = make([]byte, shaArrSize)
-    for i := range shaData {
-        shaData[i] = 0xF0
-    }
-}
 
+var shaData = make([]byte, shaArrSize)
+
+func init() {
+	shaData = make([]byte, shaArrSize)
+	for i := range shaData {
+		shaData[i] = 0xF0
+	}
+}
 
 var (
-
-	emptyWork = func(any) error{
+	emptyWork = func(any) error {
+		time.Sleep(0)
 		return nil
 	}
 
-    cpuWork = func(any) error {
-        x := 0
-        for i := range 10000 {
-            x += i * i
-        }
-        _ = x
-        return nil
-    }
+	cpuWork = func(any) error {
+		x := 0
+		for i := range 20_000 {
+			x += i * i
+		}
+		_ = x
+		return nil
+	}
+	ioWork = func(any) error {
+		var buf [1]byte
+		f, _ := os.Open("/dev/zero")
+		_, _ = f.Read(buf[:])
+		_ = f.Close()
+		return nil
+	}
 
-    ioWork = func(any) error {
-        time.Sleep(5 * time.Microsecond)
-        return nil
-    }
-
-    shaWork = func(any) error {
-        _ = sha256.Sum256(shaData)
-        return nil
-    }
+	shaWork = func(any) error {
+		_ = sha256.Sum256(shaData)
+		return nil
+	}
 )
 
 var workloads = []workload{
-    {"empty ", emptyWork},
-    {"sha256", shaWork},
-    {"cpu   ", cpuWork},
-    {"io    ", ioWork},
+	{"empty ", emptyWork},
+	{"sha256", shaWork},
+	{"cpu   ", cpuWork},
+	{"io    ", ioWork},
 }
-
 
 func newTestOptions(qt wp.QueueType) wp.Options {
 	return wp.Options{

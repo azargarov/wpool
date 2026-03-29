@@ -1,188 +1,294 @@
+# wpool
 
-# wpool — a Worker Pool for Go
+`wpool` is a Go worker pool for bounded-concurrency job execution.
 
-`wpool` is a bounded-concurrency worker pool for Go.
+It is designed for high-throughput workloads with many concurrent producers. Internally, it uses a segmented FIFO queue and batch-based draining to reduce coordination overhead.
 
-It separates **execution** from **scheduling policy**, allowing different queue
-strategies (FIFO or priority-based) to be plugged into the same execution engine.
+## What it does
 
-Module:
+- runs jobs with a fixed number of worker goroutines
+- accepts concurrent submissions from many producers
+- uses a segmented FIFO queue for scheduling
+- drains work in batches to improve throughput
+- supports graceful shutdown with `context.Context`
+- supports optional metrics collection
+- supports optional worker pinning on Linux
 
-    github.com/azargarov/wpool
+## Installation
 
+```bash
+go get github.com/azargarov/wpool
+```
 
----
-
-## Design Philosophy
-
-This project evolved through iterative refinement:
-
-- Started as a simple worker pool
-- Improved batching
-- Introduced lock-free segmented queue
-- Added pluggable scheduling
-- Implemented Revolving Bucket Queue (RBQ) with aging
-
-The result is a policy-extensible execution engine.
-
----
-
-## Architecture Overview
-
-The pool depends on a minimal scheduling interface:
+## Basic example
 
 ```go
-type schedQueue[T any] interface {
-    Push(job Job[T]) error
-    BatchPop() (Batch[T], bool)
-    OnBatchDone(b Batch[T])
-    StatSnapshot() string  // for debuggin reason
-    Close()
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    wp "github.com/azargarov/wpool"
+)
+
+func main() {
+    pool := wp.NewPoolFromOptions[*wp.NoopMetrics, int](
+        &wp.NoopMetrics{},
+        wp.Options{
+            Workers:      4,
+            QT:           wp.SegmentedQueue,
+            SegmentSize:  1024,
+            SegmentCount: 64,
+            PoolCapacity: 256,
+        },
+    )
+
+    for i := 0; i < 10; i++ {
+        v := i
+        err := pool.Submit(wp.Job[int]{
+            Payload: v,
+            Fn: func(x int) error {
+                fmt.Println("job:", x)
+                return nil
+            },
+        })
+        if err != nil {
+            panic(err)
+        }
+    }
+
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    if err := pool.Shutdown(ctx); err != nil {
+        panic(err)
+    }
 }
 ```
 
-Execution logic is independent of scheduling policy.
+## Creating a pool
 
----
-
-## Default Scheduler: SegmentedQueue (FIFO)
-
-Zero-value default.
-
-Characteristics:
-
-- Lock-free segmented FIFO
-- Multi-producer, coordinated single-consumer batch draining
-- Batch-based draining
-- Ignores submitted priority
-- Optimized for throughput
-- 0 allocs in hot path
-
-If `Options.QT` is not set, FIFO is used.
-
----
-
-## Optional Scheduler: RevolvingBucketQueue (RBQ)
-
-RBQ must be explicitly enabled:
+You can construct a pool with functional options:
 
 ```go
-opts.QT = wp.RevolvingBucketQueue
+pool := wp.NewPool(
+    &wp.NoopMetrics{},
+    wp.WithWorkers(4),
+    wp.WithQT(wp.SegmentedQueue),
+    wp.WithSegmentSize(1024),
+    wp.WithSegmentCount(64),
+)
 ```
 
-### RBQ Model
-
-- 64 priority buckets (0–63)
-- Bucket 0 is the active bucket
-- After draining bucket 0, rotation occurs
-- Priority `p` means eligibility after `p` rotations
-- Aging is implicit via rotation
-- Starvation is prevented
-
-Semantics:
-
-- Lower bucket index = higher effective priority
-- Old low-priority jobs eventually outrank new high-priority jobs
-
-RBQ is experimental and scheduling semantics may evolve in later releases.
-
----
-
-## Performance Snapshot
-
-Measured on AMD Ryzen 7 8845HS, Go 1.22, Linux.
-
-Typical steady-state throughput:
-
-    ~22–23 M jobs/sec
-    ~43 ns/op
-    0 allocs/op
-
-These figures represent queue + scheduler overhead with minimal job body.
-
----
-
-## Options
+Or with an `Options` struct:
 
 ```go
-type Options struct {
-    Workers      int
-    QT           QueueType
-    SegmentSize  uint32
-    SegmentCount uint32
-    PoolCapacity uint32
-    PinWorkers   bool
+pool := wp.NewPoolFromOptions[*wp.NoopMetrics, string](
+    &wp.NoopMetrics{},
+    wp.Options{
+        Workers:       4,
+        QT:            wp.SegmentedQueue,
+        SegmentSize:   64,
+        SegmentCount:  32,
+        PoolCapacity:  256,
+        WakeMinJobs:   16,
+        FlushInterval: 50 * time.Microsecond,
+    },
+)
+```
+
+Zero values are filled with defaults by the constructors.
+
+## Submitting jobs
+
+A job has a payload, a function, and optional metadata.
+
+```go
+err := pool.Submit(wp.Job[string]{
+    Payload: "hello",
+    Fn: func(s string) error {
+        fmt.Println(s)
+        return nil
+    },
+})
+```
+
+Job fields:
+
+- `Payload` — value passed to the job function
+- `Fn` — function executed by a worker
+- `Meta` — optional per-job context and cleanup hook
+- `Flags` — internal flags, including priority bits
+
+## Job metadata
+
+You can attach a context and a cleanup callback per job:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+defer cancel()
+
+job := wp.Job[int]{
+    Payload: 42,
+    Meta: &wp.JobMeta{
+        Ctx: ctx,
+        CleanupFunc: func() {
+            fmt.Println("cleanup")
+        },
+    },
+    Fn: func(v int) error {
+        fmt.Println(v)
+        return nil
+    },
+}
+
+if err := pool.Submit(job); err != nil {
+    panic(err)
 }
 ```
 
-Defaults:
-
-- Workers → GOMAXPROCS
-- QT → SegmentedQueue (FIFO)
-- SegmentSize → DefaultSegmentSize
-- SegmentCount → DefaultSegmentCount
-
----
-
-## Job Model
-
-```go
-type Job[T any] struct {
-    Payload T
-    Fn      JobFunc[T]
-    Flags   uint64
-    Meta    *JobMeta
-}
-```
-
-Priority is encoded in lower 6 bits of `Flags`.
-
-```go
-func (j *Job[T]) SetPriority(p JobPriority)
-func (j Job[T]) GetPriority() JobPriority
-```
-
-SegmentedQueue ignores priority.
-RBQ uses it for scheduling.
-
----
+If the job context is already canceled before submission, `Submit` returns the context error.
 
 ## Shutdown
+
+`Shutdown` stops accepting new jobs, closes the queue, and waits for workers to exit until the provided context expires.
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
 if err := pool.Shutdown(ctx); err != nil {
-    // deadline exceeded
+    // context deadline exceeded or canceled
 }
 ```
 
-- Prevents new submissions
-- Drains queued work
-- Waits for workers or deadline
+There is also a convenience method:
 
----
+```go
+pool.Stop()
+```
+
+`Stop()` calls `Shutdown(context.Background())`.
+
+## Configuration
+
+The main `Options` fields are:
+
+```go
+type Options struct {
+    Workers       int
+    SegmentSize   uint32
+    SegmentCount  uint32
+    PoolCapacity  uint32
+    QT            QueueType
+    PinWorkers    bool
+    WakeMinJobs   int64
+    FlushInterval time.Duration
+}
+```
+
+What they mean:
+
+- `Workers` — number of worker goroutines
+- `QT` — queue type used by the pool
+- `SegmentSize` — number of jobs stored in one segment
+- `SegmentCount` — number of segments preallocated at startup
+- `PoolCapacity` — maximum number of reusable internal segments kept in the segment pool
+- `PinWorkers` — pin workers to CPUs on Linux to reduce migration
+- `WakeMinJobs` — minimum pending-job threshold before eager wake-up is attempted
+- `FlushInterval` — periodic interval used to trigger draining when work is pending
+
+## Queue types
+
+`wpool` exposes a `QueueType` enum. The supported queue to use today is:
+
+- `SegmentedQueue` — lock-free segmented FIFO queue optimized for concurrent producers and batch-oriented consumption
+
+The codebase may contain other queue-related experiments, but `SegmentedQueue` is the main implementation.
+
+## Metrics
+
+The pool accepts a metrics policy.
+
+Built-in options:
+
+- `NoopMetrics` — disables metrics collection
+- `AtomicMetrics` — tracks queued and executed job counters
+
+Example:
+
+```go
+metrics := &wp.AtomicMetrics{}
+pool := wp.NewPoolFromOptions[*wp.AtomicMetrics, int](
+    metrics,
+    wp.Options{Workers: 4},
+)
+
+defer pool.Stop()
+
+_ = pool.Submit(wp.Job[int]{
+    Payload: 1,
+    Fn: func(v int) error { return nil },
+})
+
+fmt.Println(metrics.String())
+```
+
+## Errors
+
+Common submission errors:
+
+- `ErrClosed` — the pool has already been shut down
+- `ErrNilFunc` — the submitted job has a nil function
+- job context error — the job context was already canceled before submission
+
+Execution behavior:
+
+- panics inside job functions are recovered
+- cleanup callbacks still run when present
+- job execution errors are reported through the pool's internal error path
+
+## Testing
+
+Run tests:
+
+```bash
+go test ./...
+```
+
+Run with the race detector:
+
+```bash
+go test -race ./...
+```
+
+If you use the included `Makefile`, typical commands are:
+
+```bash
+make test
+make race
+make bench
+make lint
+```
+
+## Benchmarks
+
+The repository includes throughput, latency, and fairness benchmarks.
+
+Example:
+
+```bash
+go test -run=^$ -bench=. -benchmem ./...
+```
 
 ## Status
 
-Current version: 
+`wpool` is usable and tested, but still evolving.
 
-- Core architecture stable
-- FIFO scheduler stable
-- RBQ scheduling semantics experimental
-- API may evolve before v1.0.0
+The main supported path today is the segmented FIFO queue with batch draining. Some parts of the codebase are experimental or not yet enabled by default.
 
----
+## License
 
-## Motivation
-
-This project was built from fascination with system design, concurrency,
-and performance engineering.
-
-It is both:
-
-- A high-performance execution engine
-- A playground for exploring scheduling strategies
-
-Contributions and feedback are welcome.
+MIT

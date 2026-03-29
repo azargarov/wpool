@@ -1,11 +1,11 @@
 package workerpool
 
-import(
+import (
 	"context"
 	"errors"
 )
 
-const jobPrioMask  uint64 = 0b0011_1111 
+const jobPrioMask uint64 = 0b0011_1111
 
 var (
 	// ErrQueueFull is returned when the underlying queue
@@ -13,8 +13,9 @@ var (
 	ErrQueueFull = errors.New("queue: queue is full")
 
 	// ErrNilFunc is returned when a submitted Job has a nil Fn.
-	ErrNilFunc   = errors.New("queue: job func is nil")
+	ErrNilFunc = errors.New("queue: job func is nil")
 )
+
 // Batch represents a contiguous group of jobs dequeued from a schedQueue.
 //
 // The batch must be completed by calling OnBatchDone on the originating
@@ -23,10 +24,10 @@ type Batch[T any] struct {
 	Jobs []Job[T]
 	Seg  *segment[T]
 	End  uint32
-	
+
 	// Meta is an optional, queue-private field.
 	// It is opaque to the pool and interpreted only by the queue implementation.
-	Meta	any
+	Meta any
 }
 
 type JobPriority uint8
@@ -40,10 +41,10 @@ type JobFunc[T any] func(T) error
 // Ctx controls cancellation before execution.
 // CleanupFunc, if set, is executed after job completion.
 type Job[T any] struct {
-	Payload     T
-	Fn          JobFunc[T]
-	Flags 		uint64
-	Meta    	*JobMeta 
+	Payload T
+	Fn      JobFunc[T]
+	Flags   uint64
+	Meta    *JobMeta
 }
 
 type JobMeta struct {
@@ -83,16 +84,15 @@ type schedQueue[T any] interface {
 	//
 	// The returned slice must be treated as read-only.
 	// The boolean result reports whether any jobs were returned.
-	BatchPop() (Batch[T], bool) 
+	BatchPop(* Batch[T]) (bool)
 
 	// OnBatchDone signals that a previously dequeued batch
 	// has finished processing.
-	OnBatchDone(b Batch[T])
+	OnBatchDone(b *Batch[T])
 
-	StatSnapshot()string
+	StatSnapshot() string
 
 	Close()
 
 	DebugHead() string
 }
-

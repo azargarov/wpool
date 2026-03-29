@@ -1,16 +1,14 @@
 package workerpool
 
-
-type segWord 	  uint64
-type segState     uint8
-type segReserve   uint32
-type segGen       uint32
-
+type segWord uint64
+type segState uint8
+type segReserve uint32
+type segGen uint32
 
 const (
-	segOpen 	segState = iota
+	segOpen segState = iota
 	segClosed
-    segDetached
+	segDetached
 )
 
 //| 8 bit state| 24 bit reserve | 32 bit gen |
@@ -24,13 +22,12 @@ const (
 	reserveShift = genShift + genBits
 	stateShift   = reserveShift + reserveBits
 
-	genMask     = ( (uint64(1)<<genBits) - 1) << genShift
-	reserveMask = ( (uint64(1)<<reserveBits) - 1) << reserveShift
-	stateMask   = ( (uint64(1)<<stateBits) - 1) << stateShift
+	genMask     = ((uint64(1) << genBits) - 1) << genShift
+	reserveMask = ((uint64(1) << reserveBits) - 1) << reserveShift
+	stateMask   = ((uint64(1) << stateBits) - 1) << stateShift
 
 	reserveStep = segWord(1) << reserveShift
 )
-
 
 func (w segWord) state() segState {
 	return segState((uint64(w) & stateMask) >> stateShift)
@@ -52,32 +49,33 @@ func pack(state segState, reserve segReserve, gen segGen) segWord {
 
 	return segWord(
 		(uint64(state) << stateShift) |
-		(uint64(reserve) << reserveShift) |
-		(uint64(gen) << genShift),
+			(uint64(reserve) << reserveShift) |
+			(uint64(gen) << genShift),
 	)
 }
 
+//nolint:unused
 func withReserve(w segWord, r segReserve) segWord {
 	return segWord(
 		(uint64(w) &^ reserveMask) |
-		(uint64(r) << reserveShift),
+			(uint64(r) << reserveShift),
 	)
 }
 
 func withState(w segWord, s segState) segWord {
 	return segWord(
 		(uint64(w) &^ stateMask) |
-		(uint64(s) << stateShift),
+			(uint64(s) << stateShift),
 	)
 }
 
-func withGen(w segWord, s segGen) segWord{
+//nolint:unused
+func withGen(w segWord, s segGen) segWord {
 	return segWord(
 		(uint64(w) &^ genMask) |
-		(uint64(s) << genShift),
+			(uint64(s) << genShift),
 	)
 }
-
 
 // helpers
 
@@ -85,15 +83,15 @@ func incReserve(w segWord) segWord {
 	return w + reserveStep
 }
 
-func segToClosed(w segWord) (segWord) {
-	if w.state() != segOpen{
+func segToClosed(w segWord) segWord {
+	if w.state() != segOpen {
 		return w
 	}
 	return withState(w, segClosed)
 }
 
-func segToDetach(w segWord) segWord{
-	return withState(w,segDetached)
+func segToDetach(w segWord) segWord {
+	return withState(w, segDetached)
 }
 
 func nextGen(g segGen) segGen {

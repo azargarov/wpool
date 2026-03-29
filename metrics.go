@@ -1,8 +1,8 @@
 package workerpool
 
 import (
-	"sync/atomic"
 	"fmt"
+	"sync/atomic"
 	//"golang.org/x/tools/go/analysis/passes/printf"
 )
 
@@ -36,8 +36,6 @@ type AtomicMetrics struct {
 	// executed is the total number of jobs processed.
 	executed atomic.Uint64
 
-	_ [56]byte // padding to avoid false sharing
-
 	// queued is the current number of jobs enqueued.
 	queued atomic.Int64
 }
@@ -69,7 +67,7 @@ func (m *AtomicMetrics) BatchDecQueued(n int64) {
 	m.queued.Add(-n)
 }
 
-func (m *AtomicMetrics) String() string{
+func (m *AtomicMetrics) String() string {
 	return fmt.Sprintf("Executed: %d, Queued: %d", m.executed.Load(), m.queued.Load())
 }
 
@@ -85,4 +83,4 @@ type NoopMetrics struct{}
 func (m *NoopMetrics) IncExecuted()           {}
 func (m *NoopMetrics) IncQueued()             {}
 func (m *NoopMetrics) BatchDecQueued(n int64) {}
-func (m *NoopMetrics) String() string { return ""}
+func (m *NoopMetrics) String() string         { return "" }

@@ -42,14 +42,15 @@ func TestSegmentedQ_ABAUnderConcurrency(t *testing.T) {
 	// Consumers
 	for range consumers {
 		wg.Add(1)
-
+		batch := wp.Batch[int]{}
+		batch.Jobs =  make([]wp.Job[int],0,512)
 		go func() {
 			defer wg.Done()
 
 			for j := 0; j < popsPerConsumer; j++ {
-				batch, ok := q.BatchPop()
+				ok := q.BatchPop(&batch)
 				if ok {
-					q.OnBatchDone(batch)
+					q.OnBatchDone(&batch)
 				}
 				runtime.Gosched()
 			}

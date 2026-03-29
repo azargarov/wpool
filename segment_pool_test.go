@@ -1,14 +1,13 @@
 package workerpool_test
 
-import(
+import (
 	wp "github.com/azargarov/wpool"
 	"testing"
-
 )
 
 func BenchmarkSegmentPool_GetPut_(b *testing.B) {
 
-	pool := wp.NewSegmentPool[int](4096, 64, 128, 1024, 1024)
+	pool := wp.NewSegmentPool[int](4096, 64, 128)
 	defer pool.Close()
 
 	b.Run("Sequential", func(b *testing.B) {
