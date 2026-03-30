@@ -20,9 +20,9 @@ type segmentPool[T any] struct {
 }
 
 type limbo[T any] struct {
+    head 	 int
 	mu   	 sync.Mutex
     buf 	 []*segment[T]
-    head 	 int
 }
 
 func NewLimbo[T any]( pageSize uint32 ) *limbo[T]{
@@ -62,8 +62,8 @@ func NewSegmentPool[T any]( pageSize uint32, prefill int, maxKeep int ) *segment
 		s.resetForUse()
 		w := s.loadWord()
 		s.casWord(w, withState(w, segDetached))
-		s.inPool.Store(true)
-		s.nextFree.Store(p.head)
+		s.life.inPool.Store(true)
+		s.life.nextFree.Store(p.head)
 		p.head = s
 		p.kept++
 	}
@@ -71,10 +71,9 @@ func NewSegmentPool[T any]( pageSize uint32, prefill int, maxKeep int ) *segment
 	return p
 }
 
-
 func (l *limbo[T]) Retire(s *segment[T]) *segment[T] {
 	
-	s.inPool.Store(true)
+	s.life.inPool.Store(true)
 	
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -104,21 +103,21 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
 	}
     
 
-    if seg.refs.Load() != 0 {
+    if seg.life.refs.Load() != 0 {
 		panic("segmentPool.Put: segment with refs")
     }
 	
-	seg.inPool.Store(true)
+	seg.life.inPool.Store(true)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.kept >= p.maxKeep {
-		seg.inPool.Store(false)
+		seg.life.inPool.Store(false)
 		return
 	}
 	p.metrics.IncPut()
-	seg.nextFree.Store(p.head)
+	seg.life.nextFree.Store(p.head)
 	p.head = seg
 	p.kept++
 }
@@ -131,8 +130,8 @@ func (p *segmentPool[T]) Get() *segment[T] {
 	p.mu.Lock()
 	h := p.head
 	if h != nil {
-		p.head = h.nextFree.Load()
-		h.nextFree.Store(nil)
+		p.head = h.life.nextFree.Load()
+		h.life.nextFree.Store(nil)
 		p.kept--
 	}
 	p.mu.Unlock()
@@ -142,7 +141,7 @@ func (p *segmentPool[T]) Get() *segment[T] {
 		return mkSegment[T](p.pageSize)
 	}
 
-	if !h.inPool.CompareAndSwap(true, false) {
+	if !h.life.inPool.CompareAndSwap(true, false) {
 		panic("segmentPool.Get: popped segment not marked inPool")
 	}
 
@@ -151,10 +150,10 @@ func (p *segmentPool[T]) Get() *segment[T] {
 		panic("segmentPool.Get: freelist head is not detached")
 	}
 
-	if h.refs.Load() != 0 {
+	if h.life.refs.Load() != 0 {
 		panic("segmentPool.Get: freelist head has non-zero refs")
 	}
-    if h.done.Load() < int64(h.loadWord().reserve()){
+    if h.life.done.Load() < int64(h.loadWord().reserve()){
 		panic("segmentPool.Get: Done less then reserve")
     }
 	h.resetForUse()

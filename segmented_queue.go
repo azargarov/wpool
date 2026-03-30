@@ -28,9 +28,10 @@ var (
 type segmentedQ[T any] struct {
 	head     atomic.Pointer[segment[T]]
 	tail     atomic.Pointer[segment[T]]
+	lmb      *limbo[T]   
+
 	pool     segmentPoolProvider[T]
 	pageSize uint32
-	lmb      *limbo[T]   
 }
 
 func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmentedQ[T] {
@@ -49,7 +50,11 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 }
 
 func (q *segmentedQ[T]) Push(v Job[T]) error {
-	for {
+	for spins:=0 ;; spins ++ {
+
+		if spins % 8 == 0{
+			runtime.Gosched()
+		}
 		seg := q.tail.Load()
 		if seg == nil {
 			return errNilSegment
@@ -59,25 +64,23 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
  
 		// Segment is not open: advance tail and retry
 		if word.state() != segOpen {
-			next := seg.next.Load()
+			next := seg.life.next.Load()
 			if next == nil {
 				q.ensureNextSegment(seg)
 			}
-			q.tail.CompareAndSwap(seg, seg.next.Load())
+			q.tail.CompareAndSwap(seg, seg.life.next.Load())
 			continue
 		}
  
 		// Acquire a reference so the segment cannot be recycled under us
 		gen, ok := seg.tryAddRef(true)
 		if !ok {
-			runtime.Gosched()
 			continue
 		}
 		// Re-read word now that we hold a ref; verify the gen hasn't changed.
 		word = seg.loadWord()
 		if word.gen() != gen || word.state() != segOpen {
 			seg.releaseRef()
-			runtime.Gosched()
 			continue
 		}
  
@@ -106,9 +109,11 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 	}
 }
 
-
 func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
-	for {
+	for spins:=0 ;; spins++ {
+		if spins % 8 ==0 {
+			runtime.Gosched()
+		}
 		seg := q.head.Load()
 		if seg == nil {
 			return false
@@ -116,7 +121,6 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
  
 		gen, ok := seg.tryAddRef(false)
 		if !ok {
-			runtime.Gosched()
 			continue
 		}
  
@@ -148,7 +152,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 		case segOpen:
 			// If the segment looks full or already has a successor,
 			// help close it so producers stop targeting it.
-			next := seg.next.Load()
+			next := seg.life.next.Load()
 			if reserve >= q.pageSize || next != nil {
 				if seg.casWord(word, segToClosed(word)) {
 					if next != nil {
@@ -163,11 +167,10 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 			if h < reserve {
 				// Items are still in flight from producers; give them time.
 				seg.releaseRef()
-				runtime.Gosched()
 				continue
 			}
 			// Segment is fully consumed.
-			next := seg.next.Load()
+			next := seg.life.next.Load()
 			if next == nil {
 				seg.releaseRef()
 				// TODO: help producers advance
@@ -183,10 +186,9 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 		case segDetached:
 			if h < reserve {
 				seg.releaseRef()
-				runtime.Gosched()
 				continue
 			}
-			next := seg.next.Load()
+			next := seg.life.next.Load()
 			if next == nil {
 				seg.releaseRef()
 				return false
@@ -198,7 +200,6 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
  
 		// Unknown state — yield and retry.
 		seg.releaseRef()
-		runtime.Gosched()
 	}
 }
 
@@ -207,11 +208,11 @@ func (q *segmentedQ[T]) OnBatchDone(b *Batch[T]) {
 	if seg == nil {
 		panic("OnBatchDone: nil batch.Seg")
 	}
-	if seg.refs.Load() <= 0 {
+	if seg.life.refs.Load() <= 0 {
 		print(DebugSeg(seg))
 		panic("OnBatchDone: non-positive refs before release")
 	}
-	seg.done.Add(int64(len(b.Jobs)))
+	seg.life.done.Add(int64(len(b.Jobs)))
 	if seg.releaseRef() {
 		q.onZeroRefs(seg)
 	}
@@ -229,15 +230,15 @@ func (q *segmentedQ[T]) tryRecycle(s *segment[T]) {
 		return
 	case q.head.Load() == s || q.tail.Load() == s:
 		return
-	case s.refs.Load() != 0:
+	case s.life.refs.Load() != 0:
 		return
-	case s.inPool.Load():
+	case s.life.inPool.Load():
 		return
-	case s.done.Load() < int64(q.pageSize):
+	case s.life.done.Load() < int64(q.pageSize):
 		return
 	}
-	s.next.Store(nil)
-	if old := q.lmb.Retire(s); old != nil && old.refs.Load() == 0 {
+	s.life.next.Store(nil)
+	if old := q.lmb.Retire(s); old != nil && old.life.refs.Load() == 0 {
 		q.pool.Put(old)
 	}
 }
@@ -257,7 +258,7 @@ func (q *segmentedQ[T]) Close() {
 // Returns the segment that is now attached to seg.next (never nil on success).
 func (q *segmentedQ[T]) ensureNextSegment(seg *segment[T]) *segment[T] {
 	newSeg := q.pool.Get()
-	if seg.next.CompareAndSwap(nil, newSeg) {
+	if seg.life.next.CompareAndSwap(nil, newSeg) {
 		return newSeg
 	}
 	// Lost the race — mark newSeg detached so nothing tries to use it, then recycle.
@@ -268,7 +269,7 @@ func (q *segmentedQ[T]) ensureNextSegment(seg *segment[T]) *segment[T] {
 		}
 	}
 	q.pool.Put(newSeg)
-	return seg.next.Load()
+	return seg.life.next.Load()
 }
 
 // tryCloseAndAdvanceTail closes seg (if not already closed), ensures a next segment
@@ -277,7 +278,7 @@ func (q *segmentedQ[T]) tryCloseAndAdvanceTail(seg *segment[T], word segWord) {
 	// Mark the segment closed so no new reserves are issued.
 	seg.casWord(word, segToClosed(word))
  
-	next := seg.next.Load()
+	next := seg.life.next.Load()
 	if next == nil {
 		next = q.ensureNextSegment(seg)
 	}
@@ -321,7 +322,7 @@ func (q *segmentedQ[T]) MaybeHasWork() bool {
 	}
 	h := uint32(seg.consumer.head.Load())
 	r := uint32(seg.loadWord().reserve())
-	return r > h || seg.next.Load() != nil
+	return r > h || seg.life.next.Load() != nil
 }
 
 
@@ -335,10 +336,10 @@ func DebugSeg[T any](s *segment[T]) string {
 	h := s.consumer.head.Load()
 	r := s.loadWord().reserve()
 	g := headWord.gen()
-	next := s.next.Load()
-	refs := s.refs.Load()
-	inPool := s.inPool.Load()
-	done:= s.done.Load()
+	next := s.life.next.Load()
+	refs := s.life.refs.Load()
+	inPool := s.life.inPool.Load()
+	done:= s.life.done.Load()
 
 	var res strings.Builder
 	fmt.Fprintf(&res, "segment: id=%d h=%d r=%d g=%d refs=%d state=%d done=%d inPool=%t next==nil=%v headWord=%b\n",
@@ -365,9 +366,9 @@ func dbgSegId[T any](tag string, s *segment[T]) {
         " state=", s.loadWord().state(),
         " gen=", s.loadWord().gen(),
         " reserve=", s.loadWord().reserve(),
-        " refs=", s.refs.Load(),
-        " done=", s.done.Load(),
-        " inPool=", s.inPool.Load(),
+        " refs=", s.life.refs.Load(),
+        " done=", s.life.done.Load(),
+        " inPool=", s.life.inPool.Load(),
     )
 }
 
@@ -381,13 +382,13 @@ func (q *segmentedQ[T]) DebugHead() string {
 	h := head.consumer.head.Load()
 	r := head.loadWord().reserve()
 	g := headWord.gen()
-	next := head.next.Load()
-	refs := head.refs.Load()
-	inPool := head.inPool.Load()
-	done:= head.done.Load()
+	next := head.life.next.Load()
+	refs := head.life.refs.Load()
+	inPool := head.life.inPool.Load()
+	done:= head.life.done.Load()
 	
 
-	tailNext := tail.next.Load()
+	tailNext := tail.life.next.Load()
 	var res strings.Builder
 	fmt.Fprintf(&res, "head: h=%d r=%d g=%d refs=%d state=%d done=%d inPool=%t next==nil=%v tailNext==nil=%v tail==head=%v  headWord=%b\n",
 		h, r, g, refs, state, done, inPool,next == nil, tailNext == nil, tail == head, headWord)
@@ -405,10 +406,10 @@ func (q *segmentedQ[T]) DebugHead() string {
 	t := tail.consumer.head.Load()
 	r = tail.loadWord().reserve()
 	g = tailWord.gen()
-	next = tail.next.Load()
-	refs = tail.refs.Load()
-	inPool = tail.inPool.Load()
-	done = tail.done.Load()
+	next = tail.life.next.Load()
+	refs = tail.life.refs.Load()
+	inPool = tail.life.inPool.Load()
+	done = tail.life.done.Load()
 
 	fmt.Fprintf(&res, "tail: h=%d r=%d g=%d refs=%d state=%d done=%d inPool=%t next==nil=%v tailNext==nil=%v tail==head=%v  tailWord=%b\n",
 		t, r, g, refs, state, done, inPool, next == nil, tailNext == nil, tail == head, tailWord)
