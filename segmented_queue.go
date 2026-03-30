@@ -18,7 +18,6 @@ type cachePad = cpu.CacheLinePad
 
 const (
 	DefaultSegmentSize = 64
-	DefaultFastPutGet  = 32
 )
 
 var DefaultSegmentCount uint32 = uint32(runtime.GOMAXPROCS(0) * 16)
@@ -36,32 +35,211 @@ type segmentedQ[T any] struct {
 
 func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmentedQ[T] {
 	q := &segmentedQ[T]{pageSize: opts.SegmentSize}
-
-	capacity := opts.PoolCapacity
-	if capacity <= 0 {
-		capacity = opts.SegmentCount * 2
-	}
-	if spool == nil {
-		q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(capacity))
-	} else {
-		q.pool = spool
-	}
-
+    if spool != nil {
+        q.pool = spool
+    } else {
+        q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(opts.PoolCapacity))
+    }
 	first := q.pool.Get()
-	first.consumer.head.Store(0)
-
 	first.resetForUse()
-
 	q.head.Store(first)
 	q.tail.Store(first)
-	q.lmb = NewLimbo[T]()
-	for i := range(q.lmb.buf){
-		limboSeg := mkSegment[T](q.pageSize)
-		limboSeg.casWord(limboSeg.loadWord(), withState(limboSeg.loadWord(), segDetached))
-		q.lmb.buf[i] = limboSeg
-	}
-	q.lmb.head = len(q.lmb.buf) -1
+	q.lmb = NewLimbo[T](q.pageSize)
 	return q
+}
+
+func (q *segmentedQ[T]) Push(v Job[T]) error {
+	for {
+		seg := q.tail.Load()
+		if seg == nil {
+			return errNilSegment
+		}
+ 
+		word := seg.loadWord()
+ 
+		// Segment is not open: advance tail and retry
+		if word.state() != segOpen {
+			next := seg.next.Load()
+			if next == nil {
+				q.ensureNextSegment(seg)
+			}
+			q.tail.CompareAndSwap(seg, seg.next.Load())
+			continue
+		}
+ 
+		// Acquire a reference so the segment cannot be recycled under us
+		gen, ok := seg.tryAddRef(true)
+		if !ok {
+			runtime.Gosched()
+			continue
+		}
+		// Re-read word now that we hold a ref; verify the gen hasn't changed.
+		word = seg.loadWord()
+		if word.gen() != gen || word.state() != segOpen {
+			seg.releaseRef()
+			runtime.Gosched()
+			continue
+		}
+ 
+		// Claim a slot
+		r := word.reserve()
+		if r >= segReserve(q.pageSize) {
+			// Segment is full — close it, link a successor, advance tail.
+			q.tryCloseAndAdvanceTail(seg, word)
+			seg.releaseRef()
+			continue
+		}
+ 
+		newWord := incReserve(word)
+		if !seg.casWord(word, newWord) {
+			// Another producer took the slot; no need to check gen again —
+			// if the segment were recycled the CAS would already have failed.
+			seg.releaseRef()
+			continue
+		}
+ 
+		// Publish the item
+		seg.buf[r] = v
+		atomic.StoreUint32(&seg.ready[r], uint32(gen))
+		seg.releaseRef()
+		return nil
+	}
+}
+
+
+func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
+	for {
+		seg := q.head.Load()
+		if seg == nil {
+			return false
+		}
+ 
+		gen, ok := seg.tryAddRef(false)
+		if !ok {
+			runtime.Gosched()
+			continue
+		}
+ 
+		word := seg.loadWord()
+		state := word.state()
+		reserve := uint32(word.reserve())
+		h := seg.consumer.head.Load()
+ 
+		// Try to claim a run of ready slots
+		end := scanReady(seg, h, reserve, gen)
+		if end > h {
+			if seg.consumer.head.CompareAndSwap(h, end) {
+				batch.Jobs = append(batch.Jobs[:0], seg.buf[h:end]...)
+				batch.Seg = seg
+				batch.End = end
+				var zero Job[T]
+				for i := h; i < end; i++ {
+					seg.buf[i] = zero
+				}
+				return true
+			}
+			// Another consumer moved head; retry with the same seg.
+			seg.releaseRef()
+			continue
+		}
+ 
+		// No ready slots available right now
+		switch state {
+		case segOpen:
+			// If the segment looks full or already has a successor,
+			// help close it so producers stop targeting it.
+			next := seg.next.Load()
+			if reserve >= q.pageSize || next != nil {
+				if seg.casWord(word, segToClosed(word)) {
+					if next != nil {
+						q.head.CompareAndSwap(seg, next)
+					}
+				}
+			}
+			seg.releaseRef()
+			return false
+ 
+		case segClosed:
+			if h < reserve {
+				// Items are still in flight from producers; give them time.
+				seg.releaseRef()
+				runtime.Gosched()
+				continue
+			}
+			// Segment is fully consumed.
+			next := seg.next.Load()
+			if next == nil {
+				seg.releaseRef()
+				// TODO: help producers advance
+				return false
+			}
+			moved := q.head.CompareAndSwap(seg, next)
+			if moved || q.head.Load() != seg {
+				tryDetachClosed(seg)
+			}
+			seg.releaseRef()
+			continue
+ 
+		case segDetached:
+			if h < reserve {
+				seg.releaseRef()
+				runtime.Gosched()
+				continue
+			}
+			next := seg.next.Load()
+			if next == nil {
+				seg.releaseRef()
+				return false
+			}
+			q.head.CompareAndSwap(seg, next)
+			seg.releaseRef()
+			continue
+		}
+ 
+		// Unknown state — yield and retry.
+		seg.releaseRef()
+		runtime.Gosched()
+	}
+}
+
+func (q *segmentedQ[T]) OnBatchDone(b *Batch[T]) {
+	seg := b.Seg
+	if seg == nil {
+		panic("OnBatchDone: nil batch.Seg")
+	}
+	if seg.refs.Load() <= 0 {
+		print(DebugSeg(seg))
+		panic("OnBatchDone: non-positive refs before release")
+	}
+	seg.done.Add(int64(len(b.Jobs)))
+	if seg.releaseRef() {
+		q.onZeroRefs(seg)
+	}
+}
+
+func (q *segmentedQ[T]) onZeroRefs(s *segment[T]) {
+	if s != nil {
+		q.tryRecycle(s)
+	}
+}
+
+func (q *segmentedQ[T]) tryRecycle(s *segment[T]) {
+	switch {
+	case s.loadWord().state() != segDetached:
+		return
+	case q.head.Load() == s || q.tail.Load() == s:
+		return
+	case s.refs.Load() != 0:
+		return
+	case s.inPool.Load():
+		return
+	case s.done.Load() < int64(q.pageSize):
+		return
+	}
+	s.next.Store(nil)
+	if old := q.lmb.Retire(s); old != nil && old.refs.Load() == 0 {
+		q.pool.Put(old)
+	}
 }
 
 func (q *segmentedQ[T]) StatSnapshot() string {
@@ -73,239 +251,63 @@ func (q *segmentedQ[T]) Close() {
 	q.pool.Close()
 }
 
-func (q *segmentedQ[T]) Push(v Job[T]) error {
+// ensureNextSegment tries to attach a fresh segment to seg.next.
+// If the CAS loses (another goroutine won), the freshly-obtained segment is
+// marked detached and returned to the pool.
+// Returns the segment that is now attached to seg.next (never nil on success).
+func (q *segmentedQ[T]) ensureNextSegment(seg *segment[T]) *segment[T] {
+	newSeg := q.pool.Get()
+	if seg.next.CompareAndSwap(nil, newSeg) {
+		return newSeg
+	}
+	// Lost the race — mark newSeg detached so nothing tries to use it, then recycle.
 	for {
-		seg := q.tail.Load()
-		if seg == nil {
-			return errNilSegment
+		w := newSeg.loadWord()
+		if newSeg.casWord(w, withState(w, segDetached)) {
+			break
 		}
+	}
+	q.pool.Put(newSeg)
+	return seg.next.Load()
+}
 
-		word := seg.loadWord()
-		genOrig := word.gen()
-
-		if word.state() != segOpen {
-			next := seg.next.Load()
-			if next == nil {
-				newSeg := q.pool.Get()
-				if !seg.next.CompareAndSwap(nil, newSeg) {
-					w:= newSeg.loadWord()
-					wold := w
-					w= withState(w, segDetached)
-					newSeg.casWord(wold, w)
-					q.pool.Put(newSeg)		
-					continue
-				}
-			}
-			q.tail.CompareAndSwap(seg, seg.next.Load())
-			continue
-		}
-
-		gen, ok := seg.tryAddRef(true)
-		if !ok || (gen != genOrig) {
-			runtime.Gosched()
-			continue
-		}
-
-		word = seg.loadWord()
-		genOrig = word.gen()
-		if word.state() != segOpen {
-			seg.releaseRef()
-			continue
-		}
-
-		r := word.reserve()
-		if r >= segReserve(q.pageSize) {
-			seg.casWord(word, segToClosed(word))
-			next := seg.next.Load()
-			if next == nil {
-				if !seg.inPool.Load(){   // if another thread already put segment into Poll
-					newSeg := q.pool.Get()
-					if seg.next.CompareAndSwap(nil, newSeg) {
-						next = newSeg
-					} else {
-						w:= newSeg.loadWord()
-						wold := w
-						w= withState(w, segDetached)
-						newSeg.casWord(wold, w)
-						q.pool.Put(newSeg)		  
-
-						next = seg.next.Load()
-					}
-				}else{
-					panic("Push: segment in pool")
-				}
-			}
-			q.tail.CompareAndSwap(seg, next)
-			seg.releaseRef()
-			continue
-		}
-		
-		w3 := seg.loadWord()
-		if w3.gen() != genOrig || (w3.state() != segOpen){
-			seg.releaseRef()
-			continue
-		}
-		
-		newWord := incReserve(word)
-		if !seg.casWord(word, newWord) {
-			seg.releaseRef()
-			continue
-		}
-
-		seg.buf[r] = v
-		atomic.StoreUint32(&seg.ready[r], uint32(gen))
-		seg.releaseRef()
-		return nil
+// tryCloseAndAdvanceTail closes seg (if not already closed), ensures a next segment
+// exists, and tries to swing q.tail forward.
+func (q *segmentedQ[T]) tryCloseAndAdvanceTail(seg *segment[T], word segWord) {
+	// Mark the segment closed so no new reserves are issued.
+	seg.casWord(word, segToClosed(word))
+ 
+	next := seg.next.Load()
+	if next == nil {
+		next = q.ensureNextSegment(seg)
+	}
+	if next != nil {
+		q.tail.CompareAndSwap(seg, next)
 	}
 }
 
-func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) ( bool) {
+// tryDetachClosed transitions seg from segClosed to segDetached.
+// It retries on CAS failure until the state is no longer segClosed.
+func tryDetachClosed[T any](seg *segment[T]) {
 	for {
-		seg := q.head.Load()
-		if seg == nil {
-			return false
+		old := seg.loadWord()
+		if old.state() != segClosed {
+			return
 		}
-
-		gen, ok := seg.tryAddRef(false)
-		if !ok {
-			runtime.Gosched()
-			continue
+		if seg.casWord(old, segToDetach(old)) {
+			return
 		}
-
-		word := seg.loadWord()
-		state := word.state()
-		reserve := uint32(word.reserve())
-
-		h := seg.consumer.head.Load()
-
-		end := h
-		for end < reserve && atomic.LoadUint32(&seg.ready[end]) == uint32(gen) {
-			end++
-		}
-
-		if end > h {
-			if seg.consumer.head.CompareAndSwap(h, end) {
-				batch.Jobs = append(batch.Jobs[:0], seg.buf[h:end]...)
-				batch.Seg =  seg
-				batch.End = end
-
-				var zero Job[T]
-				for i := h; i < end; i++ {
-					seg.buf[i] = zero
-				}
-				return  true
-			}
-			seg.releaseRef()
-			continue
-		}
-
-		if state == segOpen {
-			next := seg.next.Load()
-			if reserve >= q.pageSize  || next != nil{
-				if seg.casWord(word, segToClosed(word)){
-					if next != nil{
-						q.head.CompareAndSwap(seg, next)
-					}
-				}
-			}
-			seg.releaseRef()
-			return  false
-		}
-
-		if h == reserve {
-			next := seg.next.Load()
-
-			if state == segClosed {
-				if next == nil {
-					seg.releaseRef()
-					// TODO: help to advance
-					return  false
-				}
-				moved := q.head.CompareAndSwap(seg, next)
-				if moved || q.head.Load() != seg {
-					for {
-						old := seg.loadWord()
-						if old.state() != segClosed {
-							break
-						}
-						if seg.casWord(old, segToDetach(old)) {
-							break
-						}
-					}
-				}
-				seg.releaseRef()
-				continue
-			}
-
-			if state == segDetached {
-				if next == nil {
-					seg.releaseRef()
-					return  false
-				}
-
-				q.head.CompareAndSwap(seg, next)
-				seg.releaseRef()
-				continue
-			}
-		}
-		seg.releaseRef()
-		runtime.Gosched()
-		continue
 	}
 }
-
-func (q *segmentedQ[T]) OnBatchDone(b *Batch[T]) {
-	seg := b.Seg
-	if seg == nil {
-		panic("OnBatchDone: nil batch.Seg")
+ 
+// scanReady returns the index one past the last consecutively-ready slot
+// starting at h, bounded by reserve.
+func scanReady[T any](seg *segment[T], h, reserve uint32, gen segGen) uint32 {
+	end := h
+	for end < reserve && atomic.LoadUint32(&seg.ready[end]) == uint32(gen) {
+		end++
 	}
-
-	refs := seg.refs.Load()
-	if refs <= 0 {
-		print(DebugSeg(seg))
-		panic("OnBatchDone: non-positive refs before release")
-	}
-
-
-	seg.done.Add(int64(len(b.Jobs)))
-	res := seg.releaseRef()
-	if res{
-		q.onZeroRefs(seg)
-	}
-}
-
-//nolint:unused
-func (q *segmentedQ[T]) onZeroRefs(s *segment[T]) {
-	if s == nil {
-		return
-	}
-	q.tryRecycle(s)
-}
-
-//nolint:unused
-func (q *segmentedQ[T]) tryRecycle(s *segment[T]) {
-
-	if s.loadWord().state() != segDetached {
-		return
-	}
-	if q.head.Load() == s || q.tail.Load() == s {
-		return
-	}
-	if s.refs.Load() != 0 {
-		return 
-	}
-	if s.inPool.Load() {
-		return
-	}
-	if s.done.Load() < (int64(q.pageSize)) {
-		return
-	}
-	s.next.Store(nil)
-
-	old := q.lmb.Retire(s)
-	if old != nil && old.refs.Load() == 0 {
-    	q.pool.Put(old)
-	}
+	return end
 }
 
 func (q *segmentedQ[T]) Len() int {
@@ -323,6 +325,9 @@ func (q *segmentedQ[T]) MaybeHasWork() bool {
 }
 
 
+// # Debugging 
+
+//nolint:unused
 func DebugSeg[T any](s *segment[T]) string {
 	headWord := s.loadWord()
 	state := headWord.state()
@@ -334,8 +339,6 @@ func DebugSeg[T any](s *segment[T]) string {
 	refs := s.refs.Load()
 	inPool := s.inPool.Load()
 	done:= s.done.Load()
-	//id:= s.id
-	
 
 	var res strings.Builder
 	fmt.Fprintf(&res, "segment: id=%d h=%d r=%d g=%d refs=%d state=%d done=%d inPool=%t next==nil=%v headWord=%b\n",
@@ -350,6 +353,7 @@ func DebugSeg[T any](s *segment[T]) string {
 	return res.String()
 }
 
+//nolint:unused
 func dbgSegId[T any](tag string, s *segment[T]) {
     if s == nil {
         println(tag, "nil")
@@ -367,6 +371,7 @@ func dbgSegId[T any](tag string, s *segment[T]) {
     )
 }
 
+//nolint:unused
 func (q *segmentedQ[T]) DebugHead() string {
 	head := q.head.Load()
 	tail := q.tail.Load()
@@ -409,5 +414,4 @@ func (q *segmentedQ[T]) DebugHead() string {
 		t, r, g, refs, state, done, inPool, next == nil, tailNext == nil, tail == head, tailWord)
 	return res.String()
 }
-
 

@@ -6,11 +6,12 @@ import (
 )
 
 const recycle = true
+const defLimboSize = 128
 
 type segmentPool[T any] struct {
-	head    *segment[T]
-	mu      sync.Mutex
-	metrics *segmentPoolMetrics
+	head     *segment[T]
+	mu       sync.Mutex
+	metrics  *segmentPoolMetrics
 
 	kept     int
 	done     chan struct{}
@@ -19,18 +20,24 @@ type segmentPool[T any] struct {
 }
 
 type limbo[T any] struct {
-	mu   sync.Mutex
-    buf []*segment[T]
-    head int
+	mu   	 sync.Mutex
+    buf 	 []*segment[T]
+    head 	 int
 }
 
-func NewLimbo[T any]() *limbo[T]{
+func NewLimbo[T any]( pageSize uint32 ) *limbo[T]{
 	l := limbo[T]{} 
-	l.buf = make([]*segment[T],128)
+	l.buf = make([]*segment[T],defLimboSize)
+	for i := range(l.buf){
+		limboSeg := mkSegment[T](pageSize)
+		limboSeg.casWord(limboSeg.loadWord(), withState(limboSeg.loadWord(), segDetached))
+		l.buf[i] = limboSeg
+	}
+	l.head = len(l.buf) -1
 	return &l
 }
 
-func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int) *segmentPool[T] {
+func NewSegmentPool[T any]( pageSize uint32, prefill int, maxKeep int ) *segmentPool[T] {
 	if maxKeep <= 0 {
 		maxKeep = max(prefill*2, 64)
 	}
@@ -67,13 +74,6 @@ func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int) *segmentPo
 
 func (l *limbo[T]) Retire(s *segment[T]) *segment[T] {
 	
-	//w := s.loadWord()
-	//if w.state() != segDetached {
-	//	if !s.casWord(w, withState(w, segDetached)) {
-	//		panic("limbo retire: detach CAS failed")
-	//    }
-	//}
-	
 	s.inPool.Store(true)
 	
 	l.mu.Lock()
@@ -84,10 +84,6 @@ func (l *limbo[T]) Retire(s *segment[T]) *segment[T] {
     l.buf[l.head] = s
     l.head = (l.head + 1) % len(l.buf)
 
-	//if old.loadWord().state() != segDetached{
-	//	print(DebugSeg(old))
-	//	panic("limbo retire: old not detached")
-	//}
     return old
 }
 
@@ -113,9 +109,6 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
     }
 	
 	seg.inPool.Store(true)
-	//if !seg.inPool.CompareAndSwap(false, true) {
-	//	return
-	//}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
