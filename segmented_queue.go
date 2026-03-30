@@ -50,11 +50,8 @@ func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmented
 }
 
 func (q *segmentedQ[T]) Push(v Job[T]) error {
-	for spins:=0 ;; spins ++ {
+	for {
 
-		if spins % 8 == 0{
-			runtime.Gosched()
-		}
 		seg := q.tail.Load()
 		if seg == nil {
 			return errNilSegment
@@ -110,10 +107,8 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 }
 
 func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
-	for spins:=0 ;; spins++ {
-		if spins % 8 ==0 {
-			runtime.Gosched()
-		}
+	for {
+
 		seg := q.head.Load()
 		if seg == nil {
 			return false
