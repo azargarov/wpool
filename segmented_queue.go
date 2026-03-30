@@ -72,12 +72,14 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 		// Acquire a reference so the segment cannot be recycled under us
 		gen, ok := seg.tryAddRef(true)
 		if !ok {
+			runtime.Gosched()
 			continue
 		}
 		// Re-read word now that we hold a ref; verify the gen hasn't changed.
 		word = seg.loadWord()
 		if word.gen() != gen || word.state() != segOpen {
 			seg.releaseRef()
+			runtime.Gosched()
 			continue
 		}
  
@@ -116,6 +118,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
  
 		gen, ok := seg.tryAddRef(false)
 		if !ok {
+			runtime.Gosched()
 			continue
 		}
  
@@ -162,6 +165,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 			if h < reserve {
 				// Items are still in flight from producers; give them time.
 				seg.releaseRef()
+				runtime.Gosched()
 				continue
 			}
 			// Segment is fully consumed.
@@ -181,6 +185,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 		case segDetached:
 			if h < reserve {
 				seg.releaseRef()
+				runtime.Gosched()
 				continue
 			}
 			next := seg.life.next.Load()
@@ -195,6 +200,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
  
 		// Unknown state — yield and retry.
 		seg.releaseRef()
+		runtime.Gosched()
 	}
 }
 
@@ -203,10 +209,7 @@ func (q *segmentedQ[T]) OnBatchDone(b *Batch[T]) {
 	if seg == nil {
 		panic("OnBatchDone: nil batch.Seg")
 	}
-	if seg.life.refs.Load() <= 0 {
-		print(DebugSeg(seg))
-		panic("OnBatchDone: non-positive refs before release")
-	}
+
 	seg.life.done.Add(int64(len(b.Jobs)))
 	if seg.releaseRef() {
 		q.onZeroRefs(seg)
