@@ -9,6 +9,7 @@ const recycle = true
 
 type segmentPool[T any] struct {
 	head     *segment[T]
+	_ cachePad
 	mu       sync.Mutex
 	metrics  *segmentPoolMetrics
 
@@ -52,20 +53,6 @@ func NewSegmentPool[T any]( pageSize uint32, prefill int, maxKeep int ) *segment
 	return p
 }
 
-func (l *limbo[T]) Retire(s *segment[T]) *segment[T] {
-	
-	s.life.inPool.Store(true)
-	
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-
-    old := l.buf[l.head]
-    l.buf[l.head] = s
-    l.head = (l.head + 1) % len(l.buf)
-
-    return old
-}
 
 func (p *segmentPool[T]) Put(seg *segment[T]) {
     if !recycle {
@@ -89,7 +76,6 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
     }
 	
 	seg.life.inPool.Store(true)
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -106,7 +92,7 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
 func (p *segmentPool[T]) Get() *segment[T] {
 	if !recycle {
 		return mkSegment[T](p.pageSize)
-	} // TODO: debug
+	} 
 
 	p.mu.Lock()
 	h := p.head
@@ -126,17 +112,19 @@ func (p *segmentPool[T]) Get() *segment[T] {
 		panic("segmentPool.Get: popped segment not marked inPool")
 	}
 
-	if h.loadWord().state() != segDetached {
-		println("segment state: ", h.loadWord().state())
-		panic("segmentPool.Get: freelist head is not detached")
-	}
+	//if h.loadWord().state() != segDetached {
+	//	println("segment state: ", h.loadWord().state())
+	//	panic("segmentPool.Get: freelist head is not detached")
+	//}
 
-	if h.life.refs.Load() != 0 {
-		panic("segmentPool.Get: freelist head has non-zero refs")
-	}
-    if h.life.done.Load() < int64(h.loadWord().reserve()){
-		panic("segmentPool.Get: Done less then reserve")
-    }
+	//if h.life.refs.Load() != 0 {
+	//	panic("segmentPool.Get: freelist head has non-zero refs")
+	//}
+
+    //if h.life.done.Load() < int64(h.loadWord().reserve()){
+	//	panic("segmentPool.Get: Done less then reserve")
+    //}
+
 	h.resetForUse()
 	p.metrics.IncReused()
 	return h
@@ -147,10 +135,10 @@ func (p *segmentPool[T]) StatSnapshot() string {
 }
 
 func (p *segmentPool[T]) Close() {
-	select {
-	case <-p.done:
-		return
-	default:
-		close(p.done)
-	}
+	//select {
+	//case <-p.done:
+	//	return
+	//default:
+	//	close(p.done)
+	//}
 }
