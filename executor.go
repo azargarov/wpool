@@ -74,8 +74,10 @@ func (p *Pool[T, M]) runJob(j Job[T]) (err error) {
 func (p *Pool[T, M]) batchProcessJob(b *Batch[T]) int64 {
 	var counter int64
 	for {
-		if !p.queue.BatchPop(b) { return counter }
-		
+		if !p.queue.BatchPop(b) {
+			return counter
+		}
+
 		p.runBatch(b.Jobs)
 		counter += int64(len(b.Jobs))
 		p.queue.OnBatchDone(b)

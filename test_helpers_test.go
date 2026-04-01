@@ -11,13 +11,12 @@ import (
 	wp "github.com/azargarov/wpool"
 )
 
+const shaArrSize = 8 * 1024
+
 type workload struct {
 	name string
 	fn   wp.JobFunc[any]
 }
-
-// var shaData = []byte("1234 deterministic payloadsome deterministic payloadsome deterministic payloadsome deterministic payload")
-const shaArrSize = 8 * 1024
 
 var shaData = make([]byte, shaArrSize)
 
@@ -36,7 +35,7 @@ var (
 
 	cpuWork = func(any) error {
 		x := 0
-		for i := range 20_000 {
+		for i := range 100_000 {
 			x += i * i
 		}
 		_ = x
@@ -67,9 +66,9 @@ func newTestOptions(qt wp.QueueType) wp.Options {
 	return wp.Options{
 		Workers:      runtime.GOMAXPROCS(0),
 		QT:           qt,
-		SegmentSize:  1024,
-		SegmentCount: 16,
-		PoolCapacity: 1024,
+		SegmentSize:  64,
+		SegmentCount: 32,
+		PoolCapacity: 64,
 	}
 }
 
@@ -111,6 +110,7 @@ func waitUntilB(b *testing.B, timeout time.Duration, cond func() bool) {
 	b.Fatal("condition not satisfied before timeout")
 }
 
+// nolint:unused
 func percentile(samples []int64, q float64) time.Duration {
 	pos := int(float64(len(samples)-1) * q)
 	return time.Duration(samples[pos])

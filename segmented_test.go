@@ -54,7 +54,7 @@ func TestSegmentedQueue_ExactOnce_MPMC(t *testing.T) {
 				QT:           wp.SegmentedQueue,
 				SegmentSize:  uint32(tc.segSize),
 				SegmentCount: uint32(tc.segCount),
-				PoolCapacity: 512,
+				PoolCapacity: 128,
 				PinWorkers:   false,
 			}
 
@@ -100,8 +100,6 @@ func TestSegmentedQueue_ExactOnce_MPMC(t *testing.T) {
 					defer prodWG.Done()
 					<-start
 
-
-
 					for id := from; id < to; id++ {
 						j := wp.Job[int]{
 							Payload: id,
@@ -124,8 +122,8 @@ func TestSegmentedQueue_ExactOnce_MPMC(t *testing.T) {
 					<-start
 
 					batch := wp.Batch[int]{}
-					batch.Jobs =  make([]wp.Job[int],0,128)
-					
+					batch.Jobs = make([]wp.Job[int], 0, 128)
+
 					for {
 						// Fast exit: all jobs consumed.
 						if consumed.Load() >= int64(tc.n) {
@@ -223,8 +221,6 @@ func TestSegmentedQueue_ExactOnce_Bursty(t *testing.T) {
 		SegmentCount: 1,
 		PoolCapacity: 512,
 	}
-	
-
 
 	q := wp.NewSegmentedQ[int](opts, nil)
 	defer q.Close()
@@ -249,9 +245,9 @@ func TestSegmentedQueue_ExactOnce_Bursty(t *testing.T) {
 		go func() {
 			defer consWG.Done()
 			for {
-				
+
 				batch := wp.Batch[int]{}
-				batch.Jobs =  make([]wp.Job[int],0,opts.SegmentSize)
+				batch.Jobs = make([]wp.Job[int], 0, opts.SegmentSize)
 
 				if consumed.Load() >= total {
 					return

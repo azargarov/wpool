@@ -84,7 +84,7 @@ type schedQueue[T any] interface {
 	//
 	// The returned slice must be treated as read-only.
 	// The boolean result reports whether any jobs were returned.
-	BatchPop(* Batch[T]) (bool)
+	BatchPop(*Batch[T]) bool
 
 	// OnBatchDone signals that a previously dequeued batch
 	// has finished processing.

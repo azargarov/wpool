@@ -12,26 +12,25 @@ type consumerView struct {
 	head atomic.Uint32
 }
 
-type segmentLifeCycle[T any] struct{
+type segmentLifeCycle[T any] struct {
 	state    atomic.Uint64
 	refs     atomic.Int64 //number of c/p referencing to segment + detached bin 63
 	done     atomic.Int64
-	next   atomic.Pointer[segment[T]]
+	next     atomic.Pointer[segment[T]]
 	nextFree atomic.Pointer[segment[T]]
-	inPool atomic.Bool 
-
+	inPool   atomic.Bool
 }
 
 type segment[T any] struct {
-	life     segmentLifeCycle[T]
+	life segmentLifeCycle[T]
 
 	producer producerView
 	consumer consumerView
 
 	// Temporary: use inPool as a "retired/unavailable" guard to prevent
-    // duplicate limbo insertion. This is broader than actual freelist membership.
-	ready  []uint32
-	buf    []Job[T]
+	// duplicate limbo insertion. This is broader than actual freelist membership.
+	ready []uint32
+	buf   []Job[T]
 }
 
 // mkSegment allocates and initializes a new segment.

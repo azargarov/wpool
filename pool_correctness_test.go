@@ -22,7 +22,7 @@ func TestPool_Health_Stress(t *testing.T) {
 
 	cpuWork := func(int) error {
 		x := 0
-		for i := 0; i < 100000; i++ {
+		for i := range 100000 {
 			x += i * i
 		}
 		_ = x
@@ -63,7 +63,13 @@ func TestPool_Health_Stress(t *testing.T) {
 				}
 
 				pool := wp.NewPoolFromOptions[*wp.AtomicMetrics, int](&wp.AtomicMetrics{}, opts)
-				defer pool.Shutdown(context.Background())
+				//defer pool.Shutdown(context.Background())
+
+				defer func() {
+					if err := pool.Shutdown(context.Background()); err != nil {
+						t.Errorf("pool shutdown failed: %v", err)
+					}
+				}()
 
 				var submitted atomic.Int64
 				var executed atomic.Int64
@@ -78,7 +84,7 @@ func TestPool_Health_Stress(t *testing.T) {
 					if !seen[id].CompareAndSwap(0, 1) {
 						dupes.Add(1)
 					}
-					wf.fn(id)
+					_ = wf.fn(id)
 					executed.Add(1)
 					wg.Done()
 					return nil

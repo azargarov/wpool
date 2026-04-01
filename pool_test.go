@@ -250,4 +250,3 @@ func testSubmitCanceledContext(t *testing.T, qt wp.QueueType) {
 		t.Fatal("expected error when submitting canceled job")
 	}
 }
-

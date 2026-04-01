@@ -8,10 +8,10 @@ import (
 const recycle = true
 
 type segmentPool[T any] struct {
-	head     *segment[T]
-	_ cachePad
-	mu       sync.Mutex
-	metrics  *segmentPoolMetrics
+	head    *segment[T]
+	_       cachePad
+	mu      sync.Mutex
+	metrics *segmentPoolMetrics
 
 	kept     int
 	done     chan struct{}
@@ -19,7 +19,7 @@ type segmentPool[T any] struct {
 	maxKeep  int
 }
 
-func NewSegmentPool[T any]( pageSize uint32, prefill int, maxKeep int ) *segmentPool[T] {
+func NewSegmentPool[T any](pageSize uint32, prefill int, maxKeep int) *segmentPool[T] {
 	if maxKeep <= 0 {
 		maxKeep = max(prefill*2, 64)
 	}
@@ -53,28 +53,26 @@ func NewSegmentPool[T any]( pageSize uint32, prefill int, maxKeep int ) *segment
 	return p
 }
 
-
 func (p *segmentPool[T]) Put(seg *segment[T]) {
-    if !recycle {
-		return 
+	if !recycle {
+		return
 	}
 
 	if seg == nil {
 		return
 	}
-    
+
 	p.metrics.IncPutAttempt()
-	
+
 	if seg.loadWord().state() != segDetached {
 		print(DebugSeg(seg))
-        panic("segmentPool.Put: non-detached segment")
+		panic("segmentPool.Put: non-detached segment")
 	}
-    
 
-    if seg.life.refs.Load() != 0 {
+	if seg.life.refs.Load() != 0 {
 		panic("segmentPool.Put: segment with refs")
-    }
-	
+	}
+
 	seg.life.inPool.Store(true)
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -92,7 +90,7 @@ func (p *segmentPool[T]) Put(seg *segment[T]) {
 func (p *segmentPool[T]) Get() *segment[T] {
 	if !recycle {
 		return mkSegment[T](p.pageSize)
-	} 
+	}
 
 	p.mu.Lock()
 	h := p.head
@@ -121,9 +119,9 @@ func (p *segmentPool[T]) Get() *segment[T] {
 	//	panic("segmentPool.Get: freelist head has non-zero refs")
 	//}
 
-    //if h.life.done.Load() < int64(h.loadWord().reserve()){
+	//if h.life.done.Load() < int64(h.loadWord().reserve()){
 	//	panic("segmentPool.Get: Done less then reserve")
-    //}
+	//}
 
 	h.resetForUse()
 	p.metrics.IncReused()

@@ -16,24 +16,28 @@ type fairnessPayload struct {
 	prio  wp.JobPriority
 }
 
-
 func BenchmarkPool_Fairness(b *testing.B) {
 	workers := getenvInt("WORKERS", runtime.GOMAXPROCS(0))
-	segCount := getenvInt("SEGCOUNT", 64)
+	segCount := getenvInt("SEGCOUNT", 32)
 
 	opts := wp.Options{
 		Workers:      workers,
 		QT:           wp.SegmentedQueue,
-		SegmentSize:  4096,
+		SegmentSize:  64,
 		SegmentCount: uint32(segCount),
-		PoolCapacity: 4096,
+		PoolCapacity: 64,
 	}
 
 	pool := wp.NewPoolFromOptions[*wp.NoopMetrics, fairnessPayload](
 		&wp.NoopMetrics{},
 		opts,
 	)
-	defer pool.Shutdown(context.Background())
+
+	defer func() {
+		if err := pool.Shutdown(context.Background()); err != nil {
+			b.Errorf("pool shutdown failed: %v", err)
+		}
+	}()
 
 	var executed atomic.Int64
 	var submitted atomic.Int64
@@ -72,8 +76,8 @@ func BenchmarkPool_Fairness(b *testing.B) {
 
 		for pb.Next() {
 			for submitted.Load()-executed.Load() > maxInflight {
-        		runtime.Gosched()
-    		}
+				runtime.Gosched()
+			}
 			// realistic skewed distribution
 			x := r.Float64()
 			var prio wp.JobPriority

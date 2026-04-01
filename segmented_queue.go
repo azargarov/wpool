@@ -26,9 +26,9 @@ var (
 )
 
 type segmentedQ[T any] struct {
-	head     atomic.Pointer[segment[T]]
-	tail     atomic.Pointer[segment[T]]
-	lmb      *limbo[T]   
+	head atomic.Pointer[segment[T]]
+	tail atomic.Pointer[segment[T]]
+	lmb  *limbo[T]
 
 	pool     segmentPoolProvider[T]
 	pageSize uint32
@@ -36,11 +36,11 @@ type segmentedQ[T any] struct {
 
 func NewSegmentedQ[T any](opts Options, spool segmentPoolProvider[T]) *segmentedQ[T] {
 	q := &segmentedQ[T]{pageSize: opts.SegmentSize}
-    if spool != nil {
-        q.pool = spool
-    } else {
-        q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(opts.PoolCapacity))
-    }
+	if spool != nil {
+		q.pool = spool
+	} else {
+		q.pool = NewSegmentPool[T](opts.SegmentSize, int(opts.SegmentCount), int(opts.PoolCapacity))
+	}
 	first := q.pool.Get()
 	first.resetForUse()
 	q.head.Store(first)
@@ -56,9 +56,9 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 		if seg == nil {
 			return errNilSegment
 		}
- 
+
 		word := seg.loadWord()
- 
+
 		// Segment is not open: advance tail and retry
 		if word.state() != segOpen {
 			next := seg.life.next.Load()
@@ -68,7 +68,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 			q.tail.CompareAndSwap(seg, seg.life.next.Load())
 			continue
 		}
- 
+
 		// Acquire a reference so the segment cannot be recycled under us
 		gen, ok := seg.tryAddRef(true)
 		if !ok {
@@ -82,7 +82,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 			runtime.Gosched()
 			continue
 		}
- 
+
 		// Claim a slot
 		r := word.reserve()
 		if r >= segReserve(q.pageSize) {
@@ -91,7 +91,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 			seg.releaseRef()
 			continue
 		}
- 
+
 		newWord := incReserve(word)
 		if !seg.casWord(word, newWord) {
 			// Another producer took the slot; no need to check gen again —
@@ -99,7 +99,7 @@ func (q *segmentedQ[T]) Push(v Job[T]) error {
 			seg.releaseRef()
 			continue
 		}
- 
+
 		// Publish the item
 		seg.buf[r] = v
 		atomic.StoreUint32(&seg.ready[r], uint32(gen))
@@ -115,18 +115,18 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 		if seg == nil {
 			return false
 		}
- 
+
 		gen, ok := seg.tryAddRef(false)
 		if !ok {
 			runtime.Gosched()
 			continue
 		}
- 
+
 		word := seg.loadWord()
 		state := word.state()
 		reserve := uint32(word.reserve())
 		h := seg.consumer.head.Load()
- 
+
 		// Try to claim a run of ready slots
 		end := scanReady(seg, h, reserve, gen)
 		if end > h {
@@ -144,7 +144,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 			seg.releaseRef()
 			continue
 		}
- 
+
 		// No ready slots available right now
 		switch state {
 		case segOpen:
@@ -159,8 +159,9 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 				}
 			}
 			seg.releaseRef()
+			runtime.Gosched()
 			return false
- 
+
 		case segClosed:
 			if h < reserve {
 				// Items are still in flight from producers; give them time.
@@ -181,7 +182,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 			}
 			seg.releaseRef()
 			continue
- 
+
 		case segDetached:
 			if h < reserve {
 				seg.releaseRef()
@@ -197,7 +198,7 @@ func (q *segmentedQ[T]) BatchPop(batch *Batch[T]) bool {
 			seg.releaseRef()
 			continue
 		}
- 
+
 		// Unknown state — yield and retry.
 		seg.releaseRef()
 		runtime.Gosched()
@@ -275,7 +276,7 @@ func (q *segmentedQ[T]) ensureNextSegment(seg *segment[T]) *segment[T] {
 func (q *segmentedQ[T]) tryCloseAndAdvanceTail(seg *segment[T], word segWord) {
 	// Mark the segment closed so no new reserves are issued.
 	seg.casWord(word, segToClosed(word))
- 
+
 	next := seg.life.next.Load()
 	if next == nil {
 		next = q.ensureNextSegment(seg)
@@ -298,7 +299,7 @@ func tryDetachClosed[T any](seg *segment[T]) {
 		}
 	}
 }
- 
+
 // scanReady returns the index one past the last consecutively-ready slot
 // starting at h, bounded by reserve.
 func scanReady[T any](seg *segment[T], h, reserve uint32, gen segGen) uint32 {
@@ -323,8 +324,7 @@ func (q *segmentedQ[T]) MaybeHasWork() bool {
 	return r > h || seg.life.next.Load() != nil
 }
 
-
-// # Debugging 
+// # Debugging
 
 //nolint:unused
 func DebugSeg[T any](s *segment[T]) string {
@@ -337,11 +337,11 @@ func DebugSeg[T any](s *segment[T]) string {
 	next := s.life.next.Load()
 	refs := s.life.refs.Load()
 	inPool := s.life.inPool.Load()
-	done:= s.life.done.Load()
+	done := s.life.done.Load()
 
 	var res strings.Builder
 	fmt.Fprintf(&res, "segment: id=%d h=%d r=%d g=%d refs=%d state=%d done=%d inPool=%t next==nil=%v headWord=%b\n",
-		0, h, r, g, refs, state, done, inPool,next == nil, headWord)
+		0, h, r, g, refs, state, done, inPool, next == nil, headWord)
 
 	res.WriteString(" ready=[")
 	for i := range r {
@@ -354,20 +354,20 @@ func DebugSeg[T any](s *segment[T]) string {
 
 //nolint:unused
 func dbgSegId[T any](tag string, s *segment[T]) {
-    if s == nil {
-        println(tag, "nil")
-        return
-    }
-    println(tag,
-        //"id=", s.id,
-        " ptr=", s,
-        " state=", s.loadWord().state(),
-        " gen=", s.loadWord().gen(),
-        " reserve=", s.loadWord().reserve(),
-        " refs=", s.life.refs.Load(),
-        " done=", s.life.done.Load(),
-        " inPool=", s.life.inPool.Load(),
-    )
+	if s == nil {
+		println(tag, "nil")
+		return
+	}
+	println(tag,
+		//"id=", s.id,
+		" ptr=", s,
+		" state=", s.loadWord().state(),
+		" gen=", s.loadWord().gen(),
+		" reserve=", s.loadWord().reserve(),
+		" refs=", s.life.refs.Load(),
+		" done=", s.life.done.Load(),
+		" inPool=", s.life.inPool.Load(),
+	)
 }
 
 //nolint:unused
@@ -383,13 +383,12 @@ func (q *segmentedQ[T]) DebugHead() string {
 	next := head.life.next.Load()
 	refs := head.life.refs.Load()
 	inPool := head.life.inPool.Load()
-	done:= head.life.done.Load()
-	
+	done := head.life.done.Load()
 
 	tailNext := tail.life.next.Load()
 	var res strings.Builder
 	fmt.Fprintf(&res, "head: h=%d r=%d g=%d refs=%d state=%d done=%d inPool=%t next==nil=%v tailNext==nil=%v tail==head=%v  headWord=%b\n",
-		h, r, g, refs, state, done, inPool,next == nil, tailNext == nil, tail == head, headWord)
+		h, r, g, refs, state, done, inPool, next == nil, tailNext == nil, tail == head, headWord)
 
 	res.WriteString(" ready=[")
 	for i := range r {
@@ -413,4 +412,3 @@ func (q *segmentedQ[T]) DebugHead() string {
 		t, r, g, refs, state, done, inPool, next == nil, tailNext == nil, tail == head, tailWord)
 	return res.String()
 }
-

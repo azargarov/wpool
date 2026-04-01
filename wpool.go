@@ -57,21 +57,20 @@ type poolMeta[M MetricsPolicy] struct {
 
 type Pool[T any, M MetricsPolicy] struct {
 	pendingJobs atomic.Int64
-	shutdown atomic.Bool
+	shutdown    atomic.Bool
 
 	queue         schedQueue[T]
 	idleWorkers   chan WakeupWorker
 	wakes         []WakeupWorker
 	workersActive []atomic.Bool
 
-	doneCh        chan struct{}
-	workersDone   chan struct{}
-	stopOnce      sync.Once
-	wgWorkers     sync.WaitGroup
-	ticker        *time.Ticker
+	doneCh      chan struct{}
+	workersDone chan struct{}
+	stopOnce    sync.Once
+	wgWorkers   sync.WaitGroup
+	ticker      *time.Ticker
 
-	meta          poolMeta[M]
-
+	meta poolMeta[M]
 }
 
 func (w *workerStat) Reset() {
@@ -203,13 +202,12 @@ func (p *Pool[T, M]) Submit(job Job[T]) error {
 
 func (p *Pool[T, M]) batchWorker(id int, wg *sync.WaitGroup, stat *workerStat) {
 	batch := Batch[T]{}
-	batch.Jobs =  make([]Job[T],0,p.meta.opts.SegmentSize)
+	batch.Jobs = make([]Job[T], 0, p.meta.opts.SegmentSize)
 	defer func() {
 		p.setWorkerState(id, false)
 		wg.Done()
 	}()
-		
-		
+
 	if p.meta.opts.PinWorkers {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
