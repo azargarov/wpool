@@ -1,18 +1,35 @@
-# wpool
+# wpool — Experimental Worker Pool for Go
 
-`wpool` is a Go worker pool for bounded-concurrency job execution.
+[![Go 1.22+](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat-square&logo=go)](https://go.dev/)
+[![MIT License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![Experimental](https://img.shields.io/badge/status-experimental-orange?style=flat-square)](https://github.com/azargarov/wpool)
+[![Go Reference](https://pkg.go.dev/badge/github.com/azargarov/wpool.svg)](https://pkg.go.dev/github.com/azargarov/wpool)
 
-It is designed for high-throughput workloads with many concurrent producers. Internally, it uses a segmented FIFO queue and batch-based draining to reduce coordination overhead.
+> ⚠️ **Experimental.** This is a research-grade implementation exploring lock-free queue design and heuristic memory reclamation in Go. It is not production-ready. See [Known Limitations](#known-limitations) before use.
 
-## What it does
+`wpool` is a **bounded-concurrency worker pool** for Go built around a **lock-free segmented FIFO queue** and **batch-based scheduling**. The primary goal is to explore how far contention and allocation overhead can be pushed down on the submission path.
 
-- runs jobs with a fixed number of worker goroutines
-- accepts concurrent submissions from many producers
-- uses a segmented FIFO queue for scheduling
-- drains work in batches to improve throughput
-- supports graceful shutdown with `context.Context`
-- supports optional metrics collection
-- supports optional worker pinning on Linux
+**Empty-job baseline** (scheduler + queue overhead only, 1 producer):
+
+```
+~93 ns/op   ·   ~10.7 M jobs/sec   ·   0 allocs/op   (w=1, p=1)
+```
+
+> Measured on AMD Ryzen 7 8845HS · Go 1.22 · Linux. See [Benchmarks](#benchmarks) for full worker/workload breakdown.
+
+---
+
+## Why wpool?
+
+
+- **Lock-free queue** built from linked segments with per-slot CAS reservation — producers never block each other
+- **Batch draining** means workers wake once to process many jobs, not once per job — cuts atomic traffic and scheduler overhead
+- **Zero allocations** on the hot path — segments are pre-allocated and recycled using generation counters (ABA-safe)
+- **Heuristic memory reclamation** via a limbo queue — safe for typical configurations, with known edge cases under investigation (see [Known Limitations](#known-limitations))
+
+This is primarily a learning and research project. The design trades simplicity and operational safety for exploration of what's achievable in lock-free Go.
+
+---
 
 ## Installation
 
@@ -20,7 +37,9 @@ It is designed for high-throughput workloads with many concurrent producers. Int
 go get github.com/azargarov/wpool
 ```
 
-## Basic example
+---
+
+## Quick Start
 
 ```go
 package main
@@ -28,267 +47,216 @@ package main
 import (
     "context"
     "fmt"
-    "time"
 
     wp "github.com/azargarov/wpool"
 )
 
 func main() {
-    pool := wp.NewPoolFromOptions[*wp.NoopMetrics, int](
-        &wp.NoopMetrics{},
-        wp.Options{
-            Workers:      4,
-            QT:           wp.SegmentedQueue,
-            SegmentSize:  1024,
-            SegmentCount: 64,
-            PoolCapacity: 256,
-        },
+    pool := wp.NewPool(
+        wp.NoopMetrics{},
+        wp.WithWorkers(4),
+        wp.WithSegmentSize(4096),
+        wp.WithSegmentCount(64),
     )
+    defer pool.Stop()
 
-    for i := 0; i < 10; i++ {
-        v := i
-        err := pool.Submit(wp.Job[int]{
-            Payload: v,
-            Fn: func(x int) error {
-                fmt.Println("job:", x)
-                return nil
-            },
-        })
-        if err != nil {
-            panic(err)
-        }
-    }
-
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-
-    if err := pool.Shutdown(ctx); err != nil {
-        panic(err)
-    }
-}
-```
-
-## Creating a pool
-
-You can construct a pool with functional options:
-
-```go
-pool := wp.NewPool(
-    &wp.NoopMetrics{},
-    wp.WithWorkers(4),
-    wp.WithQT(wp.SegmentedQueue),
-    wp.WithSegmentSize(1024),
-    wp.WithSegmentCount(64),
-)
-```
-
-Or with an `Options` struct:
-
-```go
-pool := wp.NewPoolFromOptions[*wp.NoopMetrics, string](
-    &wp.NoopMetrics{},
-    wp.Options{
-        Workers:       4,
-        QT:            wp.SegmentedQueue,
-        SegmentSize:   64,
-        SegmentCount:  32,
-        PoolCapacity:  256,
-        WakeMinJobs:   16,
-        FlushInterval: 50 * time.Microsecond,
-    },
-)
-```
-
-Zero values are filled with defaults by the constructors.
-
-## Submitting jobs
-
-A job has a payload, a function, and optional metadata.
-
-```go
-err := pool.Submit(wp.Job[string]{
-    Payload: "hello",
-    Fn: func(s string) error {
-        fmt.Println(s)
-        return nil
-    },
-})
-```
-
-Job fields:
-
-- `Payload` — value passed to the job function
-- `Fn` — function executed by a worker
-- `Meta` — optional per-job context and cleanup hook
-- `Flags` — internal flags, including priority bits
-
-## Job metadata
-
-You can attach a context and a cleanup callback per job:
-
-```go
-ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-defer cancel()
-
-job := wp.Job[int]{
-    Payload: 42,
-    Meta: &wp.JobMeta{
-        Ctx: ctx,
-        CleanupFunc: func() {
-            fmt.Println("cleanup")
+    _ = pool.Submit(wp.Job[int]{
+        Payload: 42,
+        Ctx:     context.Background(),
+        Fn: func(n int) error {
+            fmt.Println("processing", n)
+            return nil
         },
-    },
-    Fn: func(v int) error {
-        fmt.Println(v)
-        return nil
-    },
-}
-
-if err := pool.Submit(job); err != nil {
-    panic(err)
+    }, 0)
 }
 ```
 
-If the job context is already canceled before submission, `Submit` returns the context error.
+---
 
-## Shutdown
+## Architecture
 
-`Shutdown` stops accepting new jobs, closes the queue, and waits for workers to exit until the provided context expires.
+```
+Producers (N goroutines)
+        │
+        ▼
+┌───────────────────────────────────┐
+│         Segmented FIFO Queue      │
+│  ┌────────┐  ┌────────┐           │
+│  │ Seg 0  │→ │ Seg 1  │→  ...     │
+│  │ bitmap │  │ bitmap │           │
+│  │ CAS ix │  │ CAS ix │           │
+│  └────────┘  └────────┘           │
+│         ↑ recycled via pool       │
+└──────────────────┬────────────────┘
+                   │ batch drain
+        ┌──────────▼──────────┐
+        │   Batch Scheduler   │
+        │  (timer + threshold)│
+        └──────┬──────────────┘
+               │
+       ┌───────┴────────┐
+       ▼                ▼
+   Worker 0  ...   Worker N-1
+```
+
+Each queue segment holds a fixed-size job buffer with a **readiness bitmap**. Producers reserve slots via CAS; consumers drain contiguous ready ranges as a single batch — keeping cache lines warm and synchronization amortized.
+
+---
+
+## Benchmarks
+
+All results: AMD Ryzen 7 8845HS · Go 1.22 · Linux · 1 producer goroutine (`p=1`).
+
+### Empty job (scheduler + queue overhead only)
+
+| Workers | ns/op | Throughput | allocs/op |
+|---------|------:|----------:|----------:|
+| w=1 | 93 | ~10.7 Mj/s | 0 |
+| w=2 | 115 | ~8.7 Mj/s | 0 |
+| w=4 | 146 | ~6.9 Mj/s | 0 |
+| w=8 | 261 | ~3.8 Mj/s | 0 |
+| w=16 | 855 | ~1.2 Mj/s | 0 |
+
+### SHA-256 job (~4 µs CPU work)
+
+| Workers | ns/op | Throughput | allocs/op |
+|---------|------:|----------:|----------:|
+| w=1 | 4379 | 228 kj/s | 0 |
+| w=2 | 2267 | 441 kj/s | 0 |
+| w=4 | 1200 | 833 kj/s | 0 |
+| w=8 | 683 | 1463 kj/s | 0 |
+| w=16 | 557 | 1794 kj/s | 0 |
+
+### CPU-bound job (~40 µs)
+
+| Workers | ns/op | Throughput |
+|---------|------:|----------:|
+| w=1 | 40939 | 24.4 kj/s |
+| w=4 | 11064 | 90.4 kj/s |
+| w=8 | 7395 | 135 kj/s |
+| w=16 | 5927 | 169 kj/s |
+
+The pool adds near-zero overhead on the submission path. For CPU-bound or IO-bound jobs, throughput scales with worker count as expected.
+
+> Note: throughput *decreases* as workers increase for empty jobs. This is expected — with no real work, more workers means more scheduler/synchronization overhead without any benefit. The zero-allocation property holds across all scenarios.
+
+---
+
+## Known Limitations
+
+Memory reclamation in lock-free data structures is a hard problem. `wpool` currently uses a **heuristic "limbo" approach**: segments that may still be referenced are deferred and reclaimed lazily based on observed state rather than precise reference counting (e.g. hazard pointers or epoch-based reclamation).
+
+**This has a known failure mode:**
+
+> With very small segments (e.g. `SegmentSize=1`) and a small segment pool (`SegmentCount`), the limbo queue can exhaust available segments under load, causing submission to stall or fail.
+
+**Recommended configuration:** use `SegmentSize ≥ 64` and size `SegmentCount` generously relative to your worker count. The defaults are chosen to avoid this in typical use.
+
+**Status:** memory reclamation is under active investigation. The goal is to find a provably safe approach that fits Go's memory model without introducing significant overhead. Contributions and ideas welcome.
+
+---
+
+## Features
+
+| Feature | Details |
+|---|---|
+| **Lock-free queue** | Segmented MPMC FIFO, CAS-based reservation |
+| **Batch scheduling** | Amortized wakeups, better cache locality |
+| **Zero allocations** | Segment pool with generation counters |
+| **Bounded concurrency** | Fixed goroutine count, no unbounded spawning |
+| **Context-aware jobs** | `context.Context` checked before execution |
+| **Panic-safe workers** | Panics are isolated per worker |
+| **Graceful shutdown** | Deadline-aware draining via `pool.Shutdown(ctx)` |
+| **Pluggable metrics** | Interface injection keeps the hot path clean |
+| **CPU affinity** | Optional Linux worker pinning |
+
+---
+
+## Job Model
+
+```go
+type Job[T any] struct {
+    Payload     T
+    Fn          func(T) error
+    Ctx         context.Context
+    CleanupFunc func()         // always runs after execution
+}
+```
+
+Jobs are generic — no interface boxing on the submission path.
+
+---
+
+## Graceful Shutdown
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
 if err := pool.Shutdown(ctx); err != nil {
-    // context deadline exceeded or canceled
+    log.Println("shutdown timed out:", err)
 }
 ```
 
-There is also a convenience method:
+Shutdown blocks new submissions, drains queued work, and waits for in-flight jobs to complete — or until the deadline expires.
 
-```go
-pool.Stop()
-```
-
-`Stop()` calls `Shutdown(context.Background())`.
-
-## Configuration
-
-The main `Options` fields are:
-
-```go
-type Options struct {
-    Workers       int
-    SegmentSize   uint32
-    SegmentCount  uint32
-    PoolCapacity  uint32
-    QT            QueueType
-    PinWorkers    bool
-    WakeMinJobs   int64
-    FlushInterval time.Duration
-}
-```
-
-What they mean:
-
-- `Workers` — number of worker goroutines
-- `QT` — queue type used by the pool
-- `SegmentSize` — number of jobs stored in one segment
-- `SegmentCount` — number of segments preallocated at startup
-- `PoolCapacity` — maximum number of reusable internal segments kept in the segment pool
-- `PinWorkers` — pin workers to CPUs on Linux to reduce migration
-- `WakeMinJobs` — minimum pending-job threshold before eager wake-up is attempted
-- `FlushInterval` — periodic interval used to trigger draining when work is pending
-
-## Queue types
-
-`wpool` exposes a `QueueType` enum. The supported queue to use today is:
-
-- `SegmentedQueue` — lock-free segmented FIFO queue optimized for concurrent producers and batch-oriented consumption
-
-The codebase may contain other queue-related experiments, but `SegmentedQueue` is the main implementation.
+---
 
 ## Metrics
 
-The pool accepts a metrics policy.
-
-Built-in options:
-
-- `NoopMetrics` — disables metrics collection
-- `AtomicMetrics` — tracks queued and executed job counters
-
-Example:
+The metrics interface is injected at pool construction, keeping instrumentation off the critical path:
 
 ```go
-metrics := &wp.AtomicMetrics{}
-pool := wp.NewPoolFromOptions[*wp.AtomicMetrics, int](
+type MetricsPolicy interface {
+    IncQueued()
+    BatchDecQueued(n int)
+}
+```
+
+Use `wp.NoopMetrics{}` for zero overhead, or plug in Prometheus counters, etc.
+
+---
+
+## Configuration
+
+```go
+pool := wp.NewPool(
     metrics,
-    wp.Options{Workers: 4},
+    wp.WithWorkers(runtime.GOMAXPROCS(0)),
+    wp.WithSegmentSize(4096),   // jobs per segment
+    wp.WithSegmentCount(64),    // pre-allocated segments
 )
-
-defer pool.Stop()
-
-_ = pool.Submit(wp.Job[int]{
-    Payload: 1,
-    Fn: func(v int) error { return nil },
-})
-
-fmt.Println(metrics.String())
 ```
 
-## Errors
+Defaults are applied automatically via `FillDefaults()` for any unset options.
 
-Common submission errors:
+---
 
-- `ErrClosed` — the pool has already been shut down
-- `ErrNilFunc` — the submitted job has a nil function
-- job context error — the job context was already canceled before submission
+## Roadmap
 
-Execution behavior:
+- [ ] **Safe memory reclamation** — replace limbo heuristic with hazard pointers or epoch-based reclamation *(active)*
+- [ ] Bucket-based priority scheduler
+- [ ] Queue aging / rotation
+- [ ] Adaptive segment provisioning
+- [ ] NUMA-aware worker placement
 
-- panics inside job functions are recovered
-- cleanup callbacks still run when present
-- job execution errors are reported through the pool's internal error path
+---
 
-## Testing
+## When to use wpool
 
-Run tests:
+**Suitable for:**
+- Experimentation, benchmarking, and learning about lock-free queue design
+- Internal tools where you control configuration and can tolerate edge cases
+- High-frequency, short-lived jobs where allocation overhead matters
 
-```bash
-go test ./...
-```
+**Not suitable for:**
+- Production systems requiring proven memory safety guarantees
+- Extreme segment configurations (`SegmentSize=1`) — see Known Limitations
+- Long-running background tasks (use a dedicated goroutine)
+- Dynamic worker scaling
 
-Run with the race detector:
-
-```bash
-go test -race ./...
-```
-
-If you use the included `Makefile`, typical commands are:
-
-```bash
-make test
-make race
-make bench
-make lint
-```
-
-## Benchmarks
-
-The repository includes throughput, latency, and fairness benchmarks.
-
-Example:
-
-```bash
-go test -run=^$ -bench=. -benchmem ./...
-```
-
-## Status
-
-`wpool` is usable and tested, but still evolving.
-
-The main supported path today is the segmented FIFO queue with batch draining. Some parts of the codebase are experimental or not yet enabled by default.
+---
 
 ## License
 
-MIT
+[MIT](LICENSE)
