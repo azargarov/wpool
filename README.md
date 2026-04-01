@@ -129,12 +129,12 @@ All results: AMD Ryzen 7 8845HS · Go 1.22 · Linux · 1 producer goroutine (`p=
 
 ### CPU-bound job (~40 µs)
 
-| Workers | ns/op | Throughput |
-|---------|------:|----------:|
-| w=1 | 40939 | 24.4 kj/s |
-| w=4 | 11064 | 90.4 kj/s |
-| w=8 | 7395 | 135 kj/s |
-| w=16 | 5927 | 169 kj/s |
+| Workers | ns/op | Throughput | allocs/op |
+|---------|------:|----------:|----------:|
+| w=1 | 40939 | 24.4 kj/s | 0 |
+| w=4 | 11064 | 90.4 kj/s | 0 |
+| w=8 | 7395 | 135 kj/s | 0 |
+| w=16 | 5927 | 169 kj/s | 0 |
 
 The pool adds near-zero overhead on the submission path. For CPU-bound or IO-bound jobs, throughput scales with worker count as expected.
 
