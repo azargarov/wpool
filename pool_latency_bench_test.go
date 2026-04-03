@@ -100,15 +100,15 @@ func BenchmarkPool_Latency(b *testing.B) {
 
 	slices.Sort(samples)
 
-	//p50 := percentile(samples, 0.50)
-	//p90 := percentile(samples, 0.90)
-	//p99 := percentile(samples, 0.99)
+	p50 := percentile(samples, 0.50)
+	p90 := percentile(samples, 0.90)
+	p99 := percentile(samples, 0.99)
 
-	//b.Logf(
-	//	"Latency → p50=%v p90=%v p99=%v | total=%d",
-	//	p50,
-	//	p90,
-	//	p99,
-	//	total,
-	//)
+	b.Logf(
+		"Latency → p50=%v p90=%v p99=%v | total=%d",
+		p50,
+		p90,
+		p99,
+		total,
+	)
 }
