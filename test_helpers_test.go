@@ -29,7 +29,6 @@ func init() {
 
 var (
 	emptyWork = func(any) error {
-		time.Sleep(0)
 		return nil
 	}
 
