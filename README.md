@@ -21,13 +21,17 @@
 
 ## Why wpool?
 
+wpool exists primarily as a research project.
 
+It explores a few ideas:
 - **Lock-free queue** built from linked segments with per-slot CAS reservation — producers never block each other
 - **Batch draining** means workers wake once to process many jobs, not once per job — cuts atomic traffic and scheduler overhead
 - **Zero allocations** on the hot path — segments are pre-allocated and recycled using generation counters (ABA-safe)
 - **Heuristic memory reclamation** via a limbo queue — safe for typical configurations, with known edge cases under investigation (see [Known Limitations](#known-limitations))
 
-This is primarily a learning and research project. The design trades simplicity and operational safety for exploration of what's achievable in lock-free Go.
+The design deliberately trades simplicity and operational confidence for visibility into lower-level behavior. In practice, that means wpool is useful for exploring the costs of atomic coordination, cache movement, reclamation, and topology sensitivity.
+
+It is not presented here as a universally better worker pool. One of the main lessons of this project is that the value of a lock-free design depends heavily on the workload, the machine, and how much complexity a project can justify.
 
 ---
 
@@ -55,7 +59,7 @@ func main() {
     pool := wp.NewPool(
         wp.NoopMetrics{},
         wp.WithWorkers(4),
-        wp.WithSegmentSize(4096),
+        wp.WithSegmentSize(64),
         wp.WithSegmentCount(64),
     )
     defer pool.Stop()
@@ -246,14 +250,18 @@ Defaults are applied automatically via `FillDefaults()` for any unset options.
 
 **Suitable for:**
 - Experimentation, benchmarking, and learning about lock-free queue design
+- Studying contention, cache behavior, batching, and topology effects
 - Internal tools where you control configuration and can tolerate edge cases
 - High-frequency, short-lived jobs where allocation overhead matters
 
 **Not suitable for:**
 - Production systems requiring proven memory safety guarantees
 - Extreme segment configurations (`SegmentSize=1`) — see Known Limitations
-- Long-running background tasks (use a dedicated goroutine)
+- Cases where a simpler channel-based worker pool is good enough
+- Workloads that do not justify the added implementation complexity
 - Dynamic worker scaling
+  
+In other words: wpool is most interesting when the workload and hardware make these trade-offs worth studying.
 
 ---
 
