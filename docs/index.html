@@ -469,7 +469,9 @@
   <div class="container">
     <div class="kicker fade-up">Systems Engineering · Go · Concurrency</div>
     <h1 class="fade-up">What building a lock-free queue taught me about <em>thinking at CPU timescales</em></h1>
-    <p class="subtitle fade-up">I built an experimental worker pool in Go — not to ship it, but to understand what happens below the goroutine. Here's what three different machines showed me.</p>
+    <p class="subtitle fade-up">
+      A Go project that started as a worker pool and turned into a study of contention, cache behavior, and NUMA effects.
+    </p>
     <div class="meta fade-up"><span>Andrey Azargarov</span> &nbsp;·&nbsp; 2026 &nbsp;·&nbsp; github.com/azargarov/wpool</div>
   </div>
 </header>
@@ -480,15 +482,29 @@
     <div class="section-num">01 / 06</div>
     <h2>How this project changed direction</h2>
 
-<p>I started this project with a simple goal: build a worker pool in Go and make it faster than the straightforward versions I already knew. The first versions were conventional and practical, based on channels, mutexes, and a fixed group of workers. At that stage I was mostly driven by curiosity about performance. I wanted to see whether I could push the design further and build something faster than a simple pool.</p>
+<p>
+This is an experimental lock-free worker pool in Go, built as a research project rather than a production-ready queue. 
+I used it to study how contention, cache behavior, scheduling, and topology show up in measurements on real machines.
+</p>
 
-<p>I was not thinking much about hardware at the beginning. My focus was on the queue itself and on making the design work. The questions about CPU caches, memory locality, scheduling, and machine topology came later, when the implementation became more complex and some of the bottlenecks were no longer visible at the language level.</p>
+<p>I was not thinking much about hardware at the beginning. My focus was on the queue itself and on making the design work. 
+  The questions about CPU caches, memory locality, scheduling, and machine topology came later, 
+  when the implementation became more complex and some of the bottlenecks were no longer visible at the language level.</p>
 
-<p>That is how the project evolved into a lock-free segmented queue design. At first the change was mostly driven by performance. I wanted to see whether a different queue structure could push the pool further than the simpler channel-and-mutex versions. Only later, while trying to make the design work correctly and consistently under load, did I start paying attention to what was happening underneath: contention on atomic operations, cache behavior, memory locality, and machine topology. Building the queue gradually forced me to think at a lower level than I had expected at the beginning.</p>
+<p>That is how the project evolved into a lock-free segmented queue design. At first the change was mostly driven by performance. 
+  I wanted to see whether a different queue structure could push the pool further than the simpler channel-and-mutex versions. 
+  Only later, while trying to make the design work correctly and consistently under load, did I start paying attention to what 
+  was happening underneath: contention on atomic operations, cache behavior, memory locality, and machine topology. 
+  Building the queue gradually forced me to think at a lower level than I had expected at the beginning.</p>
 
-<p>One of the more useful lessons was that correctness in concurrent code is shaped by the runtime as much as by the algorithm. During development I ran into cases where a goroutine could be delayed long enough to make segment reuse unsafe if jobs were still referenced from shared queue memory. That led me to copy claimed jobs into a private slice before execution and to add a simple limbo stage before segment reuse. I know there are more established reclamation techniques, but in this project I wanted to solve the problem in a way that made the lifetime issues visible and understandable to me.</p>
+<p>One of the more useful lessons was that correctness in concurrent code is shaped by the runtime as much as by the algorithm. 
+  During development I ran into cases where a goroutine could be delayed long enough to make segment reuse unsafe if jobs were 
+  still referenced from shared queue memory. That led me to copy claimed jobs into a private slice before execution and to add a simple 
+  limbo stage before segment reuse. I know there are more established reclamation techniques, but in this project I wanted to solve the 
+  problem in a way that made the lifetime issues visible and understandable to me.</p>
 
-<p>At that point the goal of the project changed. I realized that the more valuable result was the investigation itself. Maximum throughput stopped being the only goal. The project became a way to study lock-free design in practice.</p>
+<p>At that point the goal of the project changed. I realized that the more valuable result was the investigation itself. 
+  Maximum throughput stopped being the only goal. The project became a way to study lock-free design in practice.</p>
   </div>
 </section>
 
@@ -498,11 +514,27 @@
     <div class="section-num">02 / 06</div>
     <h2>The design: why lock-free doesn't mean free</h2>
 
-    <p>A standard channel-based pool serializes submission through a mutex inside the runtime. The problem is that mutex forces <strong>sequential execution of the queue itself</strong>. When jobs are short and cheap, producers spend more time waiting to acquire the lock than actually submitting work. Add to that the overhead of parking and unparking OS threads on every lock/unlock cycle, and the potential parallelism of the system is never realised. More producers simply means a longer queue at the mutex door.</p>
+    <p>
+ A standard channel-based pool centralises submission through shared runtime queueing machinery. 
+ Under short jobs and high producer concurrency, that coordination can become a bottleneck even before the workers themselves are saturated. 
+ A lock-free queue changes the trade-off: it may reduce blocking on the submission path, but it replaces that cost with atomic 
+ coordination and memory traffic.
+    </p>
 
-    <p>A lock-free queue replaces the mutex with <strong>atomic CAS operations</strong> (Compare-And-Swap). Each producer reserves a slot independently. If two producers collide, one retries — but neither blocks, and neither parks an OS thread. The queue is divided into fixed-size segments. Each segment contains two arrays: a <code>jobs[]</code> array holding the actual work, and a <code>ready[]</code> array used for slot reservation.</p>
+    <p>
+      A lock-free queue replaces the mutex with <strong>atomic CAS operations</strong> (Compare-And-Swap). Each producer reserves a 
+      slot independently. If two producers collide, one retries — but neither blocks, and neither parks an OS thread. 
+      The queue is divided into fixed-size segments. Each segment contains two arrays: a <code>jobs[]</code> array holding the actual 
+      work, and a <code>ready[]</code> array used for slot reservation.
+    </p>
 
-    <p>The <code>ready[]</code> array stores the <strong>current epoch of the segment</strong>, not a simple boolean flag. When a segment is recycled for a new generation, the epoch increments — so there is no need to zero out the array between cycles. A slot is considered available when its stored epoch matches the current segment epoch; once a producer writes a job and stamps the slot with the current epoch, the consumer can see it as ready. This avoids a full memset on every segment recycle, which matters when segments are large.</p>
+    <p>
+      The <code>ready[]</code> array stores the <strong>current epoch of the segment</strong>, not a simple boolean flag. When a segment is 
+      recycled for a new generation, the epoch increments — so there is no need to zero out the array between cycles. A slot is 
+      considered available when its stored epoch matches the current segment epoch; once a producer writes a job and 
+      stamps the slot with the current epoch, the consumer can see it as ready. This avoids a full memset on every segment 
+      recycle, which matters when segments are large.
+    </p>
 
 <h3>The hot path</h3>
 <div class="code-block"><pre><span class="comment">// Producer: reserve one slot, write job, then publish it.</span>
@@ -540,15 +572,31 @@ end := head
     }
 }</pre></div>
 
-<p>Consumers do not execute directly from segment memory. They first scan for a contiguous published run, claim that range by advancing the consumer head, copy the claimed jobs into a private batch, and only then execute them. This separates job execution lifetime from segment lifetime.</p>
+<p>
+  Consumers do not execute directly from segment memory. They first scan for a contiguous published run, claim that range 
+  by advancing the consumer head, copy the claimed jobs into a private batch, and only then execute them. This separates job 
+  execution lifetime from segment lifetime.
+</p>
 
-<p>The copy-before-execute pattern is a direct response to a problem discovered during development: goroutines can sleep for a surprisingly long time while holding references to data associated with a live segment. Without the copy, reclamation stalls behind slow or descheduled workers. Copying the claimed range first lets the segment re-enter circulation earlier, which makes recycling more stable under real workloads.</p>
+<p>
+During development I ran into cases where a descheduled or slow worker could retain references into segment memory 
+long enough to make early reuse unsafe. That led me to copy claimed jobs into a private batch before execution and to add 
+a simple limbo stage before segment reuse.
+</p>
 
-<p>The deeper insight is that <strong>locking and memory latency are different problems</strong>. Removing locks does not necessarily remove the cost of memory access. If the structure creates cache misses, that cost remains and may become the dominant one. Measuring that effect became an important part of this work.</p>
+<p>
+  The deeper insight is that <strong>locking and memory latency are different problems</strong>. 
+  Removing locks does not necessarily remove the cost of memory access. If the structure creates cache misses, that cost 
+  remains and may become the dominant one. Measuring that effect became an important part of this work.
+</p>
 
 <div class="callout">
   <div class="callout-label">⚠ Known Limitation</div>
-  <p> In my design, memory reclamation uses a heuristic "limbo" approach — segments that may still be referenced are deferred. With very small segments and a small pool, limbo can exhaust available segments under load. Proper epoch-based or hazard-pointer reclamation is still in progress.</p>
+  <p> 
+    In my design, memory reclamation uses a heuristic "limbo" approach — segments that may still be referenced are deferred. 
+    With very small segments and a small pool, limbo can exhaust available segments under load. Proper epoch-based or hazard-pointer 
+    reclamation is still in progress.
+  </p>
 </div>
 </div>
 </section>
@@ -559,7 +607,12 @@ end := head
     <div class="section-num">03 / 06</div>
     <h2>What perf counters reveal that benchmarks hide</h2>
 
-<p>Throughput numbers tell how fast. Perf counters tell <em>why</em>. I ran the same pool against three different workloads — an empty no-op job, a SHA-256 hash, and a CPU-bound loop — while collecting hardware counters on the AMD Ryzen 7 8845HS system.</p>
+<p>
+  Throughput numbers tell how fast. Perf counters help explain why. I ran the same pool against three different workloads — 
+  an empty no-op job, a SHA-256 hash, and a CPU-bound loop — while collecting hardware counters on the AMD Ryzen 7 8845HS system.
+  These benchmarks are intended primarily as empirical observations. In several cases the mechanism is only partially understood, so 
+  I report the measured behavior first and treat causal explanations as tentative.
+</p>
     <div class="stat-row">
       <div class="stat-card">
         <div class="val bad">0.13</div>
@@ -575,31 +628,66 @@ end := head
       </div>
     </div>
 
-    <p>IPC — instructions per cycle — measures how much useful work the CPU does per clock tick. A healthy tight loop sits around 2–4. At <em class="data">0.13 IPC</em> for the empty job on the AMD, the CPU is almost entirely idle, waiting for memory.</p>
+    <p>
+      IPC — instructions per cycle — is a rough indicator of how effectively the core is being kept busy. 
+      The very low IPC in the empty-job case is consistent with a stall-heavy path, likely dominated by 
+      memory access and coordination overhead rather than useful computation.
+    </p>
   </div>
 
   <div class="wide">
     <div class="chart-wrap">
       <div class="chart-title"><strong>Hardware counter comparison</strong> — three workloads, AMD Ryzen 7 8845HS (pinned, single socket)</div>
       <canvas id="perfChart" height="280"></canvas>
-      <div class="chart-note">All values normalised to 0–100 scale for comparison. Raw: IPC 0.13/1.18/1.50 · Cache miss% 38.8/29.5/26.2 · Frontend stall% 4.2/0.3/46.2</div>
+      <div class="chart-note">All values normalised to 0–100 scale for comparison. Raw: IPC 0.13/1.18/1.50 · 
+        Cache miss% 38.8/29.5/26.2 · Frontend stall% 4.2/0.3/46.2</div>
     </div>
   </div>
 
   <div class="container">
-    <p>The cache miss rate is <em class="data">38.8%</em> for the empty job and falls to <em class="data">26.2%</em> for cpu-bound — the job's own working set fills the cache, reducing relative pressure from the queue. The 46% frontend stall for cpu-bound is entirely inside the job itself, a branch-heavy compute loop. The queue is invisible.</p>
-<p>The cross-machine cache miss story is where it gets interesting. On the Xeon Gold with 40 workers <strong>pinned to one socket</strong>, the empty-job cache miss rate is <em class="data">0.104%</em> — more than two orders of magnitude lower than the AMD. The segment pool fits almost entirely in the shared L3 and stays hot. Switch to 80 workers free-scheduled across both sockets and it jumps to <em class="data">37.2%</em> — very close to the AMD result. The same effect appears for SHA-256: pinned gives <em class="data">1.79%</em> cache misses, while free scheduling raises that to <em class="data">46.4%</em>. For the CPU-bound workload, the miss rate also rises sharply, from <em class="data">1.70%</em> to <em class="data">46.7%</em>. That pattern suggests the cost is not only in the jobs themselves, but in cache-line movement caused by many workers coordinating across the NUMA boundary.</p>
+    <p>
+The empty-job case shows the highest relative cache-miss rate. In the heavier workloads, the queue still exists, 
+but its contribution is diluted because more of the total time is spent inside the job itself. The high frontend-stall 
+share in the cpu-bound case is consistent with the structure of that benchmarked loop rather than with queue coordination alone.
+    </p>
+
+
+<p>
+  The cross-machine cache-miss comparison is where the topology effect becomes visible. On the Xeon Gold with 40 workers
+  <strong>pinned to one socket</strong>, the empty-job cache miss rate is <em class="data">0.104%</em>. With 80 workers
+  free-scheduled across both sockets, it rises to <em class="data">37.2%</em> — very close to the AMD result. The same pattern
+  appears in the heavier workloads: for SHA-256, the miss rate rises from <em class="data">1.79%</em> to <em class="data">46.4%</em>;
+  for the CPU-bound loop, from <em class="data">1.70%</em> to <em class="data">46.7%</em>. In this setup, the cache-miss profile
+  changes sharply once coordination is spread across both sockets.
+</p>
+
+
     <div class="chart-wrap">
       <div class="chart-title"><strong>Queue overhead as fraction of total job cost</strong></div>
       <canvas id="overheadChart" height="220"></canvas>
-      <div class="chart-note">Queue overhead baseline = empty job with 1 producer / 1 consumer (~93ns/op). At 16p/16c the empty-job cost rises to ~155ns due to CAS contention between producers — so the "queue tax" on sha256 is even lower than the chart suggests, since heavier workloads run with the same contention that inflates the empty-job number.</div>
+      <div class="chart-note">
+        Queue overhead baseline = empty job with 1 producer / 1 consumer (~93ns/op). 
+        At 16p/16c the empty-job cost rises to ~155ns due to CAS contention between producers — so the 
+        "queue tax" on sha256 is even lower than the chart suggests, since heavier workloads run with the 
+        same contention that inflates the empty-job number.
+      </div>
     </div>
 
     <div class="pullquote">
-      <p>“Lock-free is not free. It removes lock contention, but shifts cost into atomic coordination, memory traffic, cache behavior, and reclamation. Whether that trade pays off depends on the workload and the machine.”</p>
+      <p>
+      “Lock-free is not free. It avoids blocking locks, but shifts cost into CAS contention, memory traffic, cache behavior, 
+      and reclamation. Whether that trade pays off depends on the workload and the machine.”
+      </p>
     </div>
 
-    <p>One important nuance: the "queue overhead" baseline in the chart is measured with a single producer and single consumer — the minimum contention case, ~93ns/op. At 16 producers and 16 consumers pushing empty jobs, the measured cost rises to ~155ns because producers compete on CAS reservations. For heavier workloads like SHA-256, the real queue overhead fraction is therefore even smaller than shown — the empty-job number used as a baseline already includes contention that isn't present at the same scale when the job itself takes hundreds of nanoseconds to execute. To make a fair claim about queue overhead you need to measure job execution time in isolation, then subtract.</p>
+    <p>
+      One important nuance: the "queue overhead" baseline in the chart is measured with a single producer and single consumer — 
+      the minimum contention case, ~93ns/op. At 16 producers and 16 consumers pushing empty jobs, the measured cost rises to ~155ns 
+      because producers compete on CAS reservations. For heavier workloads like SHA-256, the real queue overhead fraction is 
+      therefore even smaller than shown — the empty-job number used as a baseline already includes contention that isn't 
+      present at the same scale when the job itself takes hundreds of nanoseconds to execute. To make a fair claim about queue 
+      overhead you need to measure job execution time in isolation, then subtract.
+    </p>
 
     <h3>The channel comparison</h3>
     <p>I benchmarked the same harness with a plain buffered channel, on the AMD Ryzen 7 8845HS system.</p>
@@ -615,9 +703,19 @@ end := head
       </tbody>
     </table>
 
-    <p>My current explanation is a combination of allocation behavior in the benchmark harness and scheduler overhead when producers hit backpressure. But I’d want more isolated microbenchmarks before treating that as a complete explanation.</p>
+    <p>
+     My current interpretation is that this gap reflects benchmark-harness allocation effects plus scheduler behavior under backpressure, 
+     not a universal statement that channels are inherently slower. I would want a more isolated 
+     microbenchmark before making a stronger claim.
+    </p>
 
-    <p><em>Note: the allocation cost is in the benchmark harness, not inherent to channels. A production channel pool with a sync.Pool for job structs would close part of this gap. The comparison is honest for "naive channel dispatch", not for a carefully optimised channel pool.</em></p>
+    <p>
+      <em>
+      Note: the allocation cost is in the benchmark harness, not inherent to channels. A production channel pool 
+      with a sync.Pool for job structs would close part of this gap. The comparison is honest for "naive channel dispatch", 
+      not for a carefully optimised channel pool.
+    </em>
+  </p>
   </div>
 </section>
 
@@ -627,7 +725,10 @@ end := head
     <div class="section-num">04 / 06</div>
     <h2>Three machines, three different stories</h2>
 
-    <p>I ran the same latency benchmark on three different machines. The test submits jobs continuously and samples latency percentiles at 1, 100, 10k, 1M, and full-run job counts — capturing cold start, warmup, and steady state in a single pass.</p>
+    <p>
+      I ran the same latency benchmark on three different machines. The test submits jobs continuously and samples 
+      latency percentiles at 1, 100, 10k, 1M, and full-run job counts — capturing cold start, warmup, and steady state in a single pass.
+    </p>
 
 <div class="hw-grid">
   <div class="hw-card">
@@ -653,8 +754,12 @@ end := head
   <div class="chart-wrap">
     <div class="chart-title"><strong>Latency warmup curve</strong> — p50, p90, p99 across job-count milestones</div>
     <canvas id="latencyChart" height="320"></canvas>
-    <div class="chart-note">Xeon Gold values shown for the 20t single-socket configuration. The 80t dual-socket result reaches p99 = 2300µs at 1M jobs and is truncated for scale.</div>
-    <div class="chart-note">Steady-state values are averages over 10 benchmark runs. On the Xeon Gold pinned to a single socket, steady-state latency averaged p50 = 9.0 µs, p90 = 30.3 µs, and p99 = 102 µs; the tail remained stable with low run-to-run variance.</div>
+    <div class="chart-note">Xeon Gold values shown for the 20t single-socket configuration. The 80t dual-socket result reaches 
+      p99 = 2300µs at 1M jobs and is truncated for scale.
+    </div>
+    <div class="chart-note">Steady-state values are averages over 10 benchmark runs. On the Xeon Gold pinned to a single socket,
+       steady-state latency averaged p50 = 9.0 µs, p90 = 30.3 µs, and p99 = 102 µs; the tail remained stable with low run-to-run variance.
+    </div>
     <div class="chart-note">For the E5-2640, steady-state standard deviation across runs was p50 ±0.04 µs, p90 ±0.64 µs, and p99 ±11.6 µs.</div>
   </div>
 </div>
@@ -662,12 +767,23 @@ end := head
   <div class="container">
 
     <h3>Finding 1: startup effects dominate early latency</h3>
-    <p>The first job costs <em class="data">50–200µs</em> depending on the machine. By 10,000 jobs, p50 has dropped by <em class="data">10–35×</em>. The first job is not a clean queue measurement but mostly reflects OS thread scheduling, goroutine stack allocation, and TLB misses as segment-pool pages fault in. </p>
-    <p>A single average benchmark number hides that behavior. Under startup load, the first hundred requests absorb the cold-start tax.</p>
+    <p>
+       The first-job cost is not a clean measurement of steady-state queue behavior. It likely includes a mix of 
+       runtime startup effects, initial scheduling, first-touch memory costs, and warmup of the segment pool.
+    </p>
+    <p>A single average benchmark number hides that behavior. Under startup load, the first hundred requests absorb the cold-start tax.
+    </p>
 
-    <h3>Finding 2: the E5-2640 punches above its weight</h3>
-    <p>The 2013 E5-2640 at 2.5GHz achieves <em class="data">p50 = 2.5µs</em> and <em class="data">p99 = 68µs</em>. Compare that to the Xeon Gold at 2.0GHz with 20 threads on one socket: <em class="data">p50 = 9µs</em>, <em class="data">p99 = 102µs</em>. The Xeon E5-2640 has better tail latency.</p>
-    <p>One likely explanation is that fewer cores and a simpler memory topology reduce contention around the segment pool and limbo reclamation path. If so, the limiting factor here is not just clock speed, but how the algorithm interacts with concurrency and topology.</p>
+    <h3>Finding 2: the E5-2640 performs better than its age and clock speed would suggest</h3>
+    <p>
+      The 2013 E5-2640 at 2.5GHz achieves <em class="data">p50 = 2.5µs</em> and <em class="data">p99 = 68µs</em>. 
+      Compare that to the Xeon Gold at 2.0GHz with 20 threads on one socket: <em class="data">p50 = 9µs</em>, 
+      <em class="data">p99 = 102µs</em>. The Xeon E5-2640 has better tail latency.
+    </p>
+    <p>One likely explanation is that fewer cores and a simpler memory topology reduce contention around the segment pool and 
+      limbo reclamation path. If so, the limiting factor here is not just clock speed, but how the algorithm interacts with 
+      concurrency and topology.
+    </p>
 
     <h3>Finding 3: cross-socket scheduling worsens tail latency</h3>
     <p>This is the result I didn't fully anticipate. The Xeon Gold has two sockets. When the OS schedules goroutines across both:</p>
@@ -705,9 +821,20 @@ end := head
   </div>
 
   <div class="container">
-    <p>When workers are pinned to a single socket — regardless of which socket — p99 is ~380µs and throughput is ~680 ns/op. Both sockets are symmetric. When the OS schedules freely across both sockets, p99 jumps to ~2300µs: <strong>~6× worse</strong>. The throughput paradox also appears: 80 free-scheduled threads produce worse ns/op (1165) than 40 pinned threads (680).</p>
 
-<p>The perf counters strongly suggest the mechanism. With 40 threads pinned to a single socket, the empty-job cache miss rate is <em class="data">0.104%</em>. With 80 threads free-scheduled across both sockets, it rises to <em class="data">37.2%</em> — roughly 350× higher. That points less to the jobs themselves being limited by remote memory latency, and more to <strong>CAS contention from 80 goroutines spread across two sockets repeatedly touching the same queue structures across a coherence boundary</strong>. Under the limbo heuristic, occasional reclamation stalls appear to amplify that effect into millisecond-range tail spikes. In this setup, the practical fix is not to avoid NUMA entirely, but to pin workers to one socket so contention stays within a single coherence domain.</p>
+<p>
+  When workers were pinned to a single socket, tail latency stayed far lower than in the free-scheduled dual-socket configuration.
+  From these measurements alone I cannot separate the contribution of scheduler placement, coherence traffic, cache disruption,
+  and reclamation stalls precisely. What the benchmark does show clearly is the practical result in this setup: keeping workers
+  within one socket substantially improved both tail latency and throughput.
+</p>
+<p>
+  The perf counters are consistent with that result. With 40 threads pinned to a single socket, the empty-job cache miss rate is
+  <em class="data">0.104%</em>. With 80 threads free-scheduled across both sockets, it rises to <em class="data">37.2%</em> —
+  roughly 350× higher. That pattern is consistent with much heavier cross-socket coordination overhead once many goroutines touch
+  the same queue structures across two coherence domains. Under the current limbo heuristic, reclamation stalls may further amplify
+  the tail.
+</p>
     <table class="data-table">
       <thead>
         <tr><th>Machine / Config</th><th>Threads</th><th>p50</th><th>p90</th><th>p99</th><th>ns/op</th></tr>
@@ -721,9 +848,12 @@ end := head
       </tbody>
     </table>
 
-    <div class="pullquote">
-      <p>"Socket 0 pinned vs socket 1 pinned: identical. Socket 0 pinned vs free scheduled across both: 6× worse p99, 200× worse cache miss rate. The hardware is symmetric — the scheduler is not."</p>
-    </div>
+<div class="pullquote">
+  <p>
+    The two pinned single-socket configurations behaved similarly, while free scheduling across both sockets behaved
+    much worse — placement mattered more than nominal socket symmetry.
+  </p>
+</div>
   </div>
 </section>
 
@@ -733,16 +863,27 @@ end := head
     <div class="section-num">05 / 06</div>
     <h2>Segment size: configuration is architecture</h2>
 
-    <p>The segment size is not just a tuning knob — it determines how the queue amortises per-operation overhead, and at the extreme it breaks the zero-allocation guarantee entirely.</p>
+<p>
+  Segment size is not just a tuning knob — it shapes how effectively the queue amortises per-operation overhead, 
+  and at the extreme it can destroy the zero-allocation behavior entirely.
+</p>
 
-    <p>I swept segment size from 1 to 4096 on all three machines with SEGCOUNT=128 constant. The shape of the curve differs by machine, and that difference tells a story about cache hierarchy.</p>
+    <p>
+      I swept segment size from 1 to 4096 on all three machines with SEGCOUNT=128 constant. The shape of the curve differs by 
+      machine, and that difference tells a story about cache hierarchy.
+    </p>
   </div>
 
   <div class="wide">
     <div class="chart-wrap">
       <div class="chart-title"><strong>Segment size sweep — throughput across three machines</strong> (empty job, SEGCOUNT=128)</div>
       <canvas id="segChart" height="280"></canvas>
-      <div class="chart-note">Red point = size=1 (limbo exhaustion, 2 allocs/op). Blue = size=64 (default). Xeon E5-2640 plateau appears earlier (size=256) due to smaller L3 cache — larger segments evict each other.</div>
+      <div class="chart-note">
+        Red point = size=1 (limbo exhaustion, 2 allocs/op). Blue = size=64 (default). 
+        One plausible interpretation is that the E5-2640 reaches its useful segment-size plateau earlier because its 
+        cache hierarchy tolerates a smaller effective working set. Past that point, larger segments stop helping and may begin to 
+        displace each other.
+      </div>
     </div>
   </div>
 
@@ -763,11 +904,26 @@ end := head
       </tbody>
     </table>
 
-    <p>Three findings stand out. First, <strong>size=1 breaks the zero-alloc guarantee on every machine</strong> — 2 allocs/op appear as limbo exhaustion forces the allocator to create new segments. On the Xeon GOLD 6138×2 with 80 workers this is catastrophic: 5839 ns/op vs 166 ns/op on the AMD 8845HS, because 80 concurrent goroutines exhaust the limbo queue far faster.</p>
+<p>
+  Three findings are worth noting: 
+  First, <strong>size=1 breaks the zero-allocation behavior in these tests on every machine</strong>:
+  2 allocs/op appear, consistent with segment reuse falling behind and new segments being allocated. On the Xeon Gold 6138×2
+  with 80 workers, this effect is much more severe — 5839 ns/op versus 166 ns/op on the AMD 8845HS in the tested configuration.
+  
+</p>
 
-    <p>Second, the <strong>Xeon E5-2640 plateau appears at size=256</strong> while AMD 8845HS and Xeon GOLD 6138×2 continue improving to 4096. The Xeon E5-2640 has a smaller L3 relative to the number of active segments — once segments exceed the cache working set, larger segments start evicting each other and the gains reverse. This is the L3 cache size written in benchmark numbers.</p>
+<p>
+  Second, the <strong>Xeon E5-2640 plateau appears at size=256</strong> while AMD 8845HS and Xeon Gold 6138×2 continue
+  improving to 4096. In other words, useful segment-size scaling stops earlier on the E5-2640 in this benchmark, even though
+  larger segments still help on the other two machines.
+</p>
 
-    <p>Third, <em class="data">bytes/op</em> is non-zero even at 0 allocs — 33–41 bytes depending on size. This is stack growth and goroutine scheduler overhead, not heap allocation. Safe to ignore as long as allocs/op is zero.</p>
+    <p>
+      Third, <em class="data">bytes/op</em> is non-zero.
+      Bytes/op remains non-zero even when allocs/op is zero. In Go benchmarks that usually reflects runtime bookkeeping, 
+      stack effects, or other non-heap accounting rather than user-visible heap allocation. For this article, allocs/op is the more 
+      important signal.
+    </p>
   </div>
 </section>
 
@@ -775,16 +931,36 @@ end := head
 <section>
   <div class="container">
     <div class="section-num">06 / 06</div>
-    <h2>What this project gave me</h2>
+<h2>What this project gave me</h2>
 
-    <p>The measurements were useful because they gave me something more concrete than “this machine feels slower.” On some systems the queue behaved predictably and stayed stable once warm. On others, especially across sockets, the same design showed much worse tail behavior. That made the project less about proving one queue is better than another and more about learning how software structure meets hardware reality. The important result for me was not a single benchmark number, but a better ability to connect symptoms to mechanisms.</p>
+<p>
+  The measurements were useful because they provided something more concrete than a general impression that one machine felt slower.
+  On some systems the queue behaved predictably and remained stable after warm-up. On others, especially in cross-socket
+  configurations, the same design showed substantially worse tail behavior. That shifted the project away from trying to show that
+  one queue design is universally better and toward understanding how a particular design interacts with different hardware
+  environments. For me, the most useful result was not any single benchmark number, but a better ability to relate observed
+  behavior to plausible underlying mechanisms.
+</p>
 
-    <p>So I do not present this project as a finished answer. I see it more as a research step. It taught me that lock-free does not remove complexity; it moves complexity into places that are easier to ignore at first: memory visibility, cache movement, reclamation, and scheduling behavior. It also taught me that if I want to keep building concurrent structures, I need more theory, especially around safe memory reclamation and the broader design space of lock-free queues. That is probably the next stage of the work.</p>
+<p>
+  I do not present this project as a finished answer, but as one step in an ongoing investigation. It showed that lock-free design
+  does not eliminate complexity; it shifts complexity into areas that are easy to underestimate at first, including memory
+  visibility, cache movement, reclamation, and scheduling behavior. It also made clear that further progress will require more
+  theoretical grounding, particularly in safe memory reclamation and in the broader design space of lock-free queues. That is the
+  most likely direction for the next stage of the work.
+</p>
 
-    <p>Even in its current state, though, the project was worth doing. It gave me a more practical understanding of what contention means, what cache effects look like in measurements, and why the same algorithm can behave very differently on different machines. That was the real outcome I was looking for, even if I only understood that clearly near the end.</p>
+<p>
+  Even in its current state, the project was still worthwhile. It provided a more practical understanding of contention,
+  of how cache effects appear in measurements, and of why the same algorithm can behave differently across machines.
+  That was the main outcome of the work, even though it became fully clear only near the end.
+</p>
 
 <h3>The diagnostic ladder</h3>
-<p>One practical result of this project is that it changed the order in which I look at performance problems. When something is slow, this is usually where I start:</p>
+<p>
+  One practical result of this project is that it changed the order in which I look at performance problems. 
+  When something is slow, this is usually where I start:
+</p>
 
 <div class="code-block"><pre><span class="comment"># Step 1: Is the CPU doing useful work?</span>
 perf stat -e cycles,instructions ...
