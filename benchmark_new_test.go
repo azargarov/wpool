@@ -227,8 +227,9 @@ func BenchmarkPool_Single(b *testing.B) {
 	segSize := getenvInt("SEGSIZE", 64)
 	segCount := getenvInt("SEGCOUNT", 32)
 	capacity := getenvInt("POOLCAP", 64)
+	testID := getenvInt("TEST", 0)
 
-	wl := workloads[0]
+	wl := workloads[testID]
 	b.Run(wl.name, func(b *testing.B) {
 		brRunPoolEndToEndBounded(
 			b,
